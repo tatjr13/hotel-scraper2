@@ -23,15 +23,18 @@ logging.basicConfig(
     ]
 )
 
-# Configuration
+# --- MODIFIED CONFIGURATION ---
+# Increased timeout to give slow proxies a better chance.
+PROXY_TIMEOUT = 20 
+PAGE_TIMEOUT = 30000
+# --- END MODIFICATION ---
+
 NUM_NIGHTS = 1
 NUM_DATES = 3
 CHECKPOINT_FILE = "checkpoint.json"
 RESULTS_FILE = "cheapest_10k_hotels_by_city.csv"
 PROXY_TEST_URL = "https://httpbin.org/ip"
 MAX_RETRIES = 3
-PROXY_TIMEOUT = 10
-PAGE_TIMEOUT = 30000
 MAX_CONCURRENT = int(os.environ.get('MAX_CONCURRENT', '5'))  # Configurable concurrency
 
 @dataclass
@@ -54,43 +57,57 @@ class ProxyManager:
     def _load_proxies(self, proxy_file: str) -> List[Proxy]:
         """Load proxies from file"""
         proxies = []
-        with open(proxy_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and line.count(":") == 3:
-                    host, port, user, pwd = line.split(":")
-                    proxies.append(Proxy(
-                        server=f"http://{host}:{port}",
-                        username=user,
-                        password=pwd
-                    ))
-        logging.info(f"Loaded {len(proxies)} proxies")
+        try:
+            with open(proxy_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and line.count(":") == 3:
+                        host, port, user, pwd = line.split(":")
+                        proxies.append(Proxy(
+                            server=f"http://{host}:{port}",
+                            username=user,
+                            password=pwd
+                        ))
+            logging.info(f"Loaded {len(proxies)} proxies from {proxy_file}")
+        except FileNotFoundError:
+            logging.error(f"Proxy file not found: {proxy_file}")
         return proxies
     
     async def test_proxy(self, proxy: Proxy) -> bool:
-        """Test if proxy is working"""
+        """Test if proxy is working and log detailed errors."""
         try:
             auth = aiohttp.BasicAuth(proxy.username, proxy.password)
-            connector = aiohttp.TCPConnector(ssl=False)
             timeout = aiohttp.ClientTimeout(total=PROXY_TIMEOUT)
             
-            async with aiohttp.ClientSession(
-                connector=connector,
-                timeout=timeout,
-                auth=auth
-            ) as session:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(
                     PROXY_TEST_URL,
-                    proxy=proxy.server
+                    proxy=proxy.server,
+                    proxy_auth=auth,
+                    ssl=False # Added for broader compatibility
                 ) as response:
-                    return response.status == 200
+                    if response.status == 200:
+                        logging.info(f"Proxy {proxy.server} is working.")
+                        return True
+                    else:
+                        # --- MODIFIED LOGGING ---
+                        # Log the failing status code for better diagnostics.
+                        logging.warning(f"Proxy {proxy.server} test failed with status: {response.status}")
+                        return False
         except Exception as e:
-            logging.debug(f"Proxy {proxy.server} failed test: {e}")
+            # --- MODIFIED LOGGING ---
+            # Log the specific exception to know WHY it failed (e.g., TimeoutError).
+            logging.warning(f"Proxy {proxy.server} test failed: {type(e).__name__} - {e}")
             return False
     
-    async def initialize(self, sample_size: int = 20):
+    async def initialize(self, sample_size: int = 100): # --- INCREASED SAMPLE SIZE ---
         """Test a sample of proxies to find working ones"""
-        logging.info("Testing proxies...")
+        if not self.proxies:
+            logging.error("Proxy list is empty. Cannot initialize.")
+            raise Exception("Proxy list is empty.")
+
+        logging.info(f"Testing a random sample of {sample_size} proxies...")
+        # Ensure sample_size is not larger than the number of proxies available.
         sample = random.sample(self.proxies, min(sample_size, len(self.proxies)))
         
         tasks = [self.test_proxy(proxy) for proxy in sample]
@@ -100,9 +117,10 @@ class ProxyManager:
             proxy for proxy, is_working in zip(sample, results) if is_working
         ]
         
-        logging.info(f"Found {len(self.working_proxies)} working proxies out of {len(sample)} tested")
+        logging.info(f"Found {len(self.working_proxies)} working proxies out of {len(sample)} tested.")
         
         if not self.working_proxies:
+            logging.error("Could not find any working proxies from the tested sample.")
             raise Exception("No working proxies found!")
     
     async def get_proxy(self) -> Optional[Proxy]:
@@ -111,21 +129,23 @@ class ProxyManager:
             if not self.working_proxies:
                 return None
                 
-            # Round-robin through working proxies
             proxy = self.working_proxies[self.current_index % len(self.working_proxies)]
             self.current_index += 1
             
-            # If proxy has too many failures, remove it
             if proxy.failures > 3:
                 self.working_proxies.remove(proxy)
-                logging.warning(f"Removed failed proxy: {proxy.server}")
+                logging.warning(f"Removed consistently failing proxy: {proxy.server}")
+                # Try to get the next one in the list
+                return await self.get_proxy() if self.working_proxies else None
                 
-            return proxy if self.working_proxies else None
+            return proxy
     
     async def mark_proxy_failed(self, proxy: Proxy):
         """Mark proxy as failed"""
         async with self.lock:
             proxy.failures += 1
+
+# ... (The rest of the file remains the same) ...
 
 class CheckpointManager:
     """Manages progress checkpointing"""
@@ -136,9 +156,13 @@ class CheckpointManager:
     def _load_checkpoint(self) -> set:
         """Load completed cities from checkpoint"""
         if os.path.exists(self.checkpoint_file):
-            with open(self.checkpoint_file, 'r') as f:
-                data = json.load(f)
-                return set(data.get('completed', []))
+            try:
+                with open(self.checkpoint_file, 'r') as f:
+                    data = json.load(f)
+                    return set(data.get('completed', []))
+            except json.JSONDecodeError:
+                logging.warning(f"Could not read checkpoint file {self.checkpoint_file}. Starting fresh.")
+                return set()
         return set()
     
     def save_checkpoint(self):
@@ -159,52 +183,49 @@ async def scrape_city_date(
     city: str,
     checkin: datetime,
     checkout: datetime,
-    proxy_manager: ProxyManager
+    proxy_manager: ProxyManager,
+    use_proxy: bool = True
 ) -> Optional[Dict]:
     """Scrape hotels for a specific city and date"""
     
     for attempt in range(MAX_RETRIES):
-        proxy = await proxy_manager.get_proxy()
-        if not proxy:
-            logging.error("No working proxies available")
+        proxy = await proxy_manager.get_proxy() if use_proxy else None
+        if use_proxy and not proxy:
+            logging.error("No working proxies available for this attempt.")
             return None
             
         browser = None
         try:
             async with async_playwright() as p:
-                # Launch browser with proxy
-                browser = await p.chromium.launch(
-                    proxy={
+                launch_options = {
+                    "headless": True,
+                    "args": ['--disable-blink-features=AutomationControlled']
+                }
+                if use_proxy and proxy:
+                    launch_options["proxy"] = {
                         "server": proxy.server,
                         "username": proxy.username,
                         "password": proxy.password
-                    },
-                    headless=True,
-                    args=['--disable-blink-features=AutomationControlled']
-                )
+                    }
+                
+                browser = await p.chromium.launch(**launch_options)
                 
                 context = await browser.new_context(
                     viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 )
                 
                 page = await context.new_page()
                 
-                # Navigate to site
                 await page.goto("https://www.aadvantagehotels.com/", timeout=PAGE_TIMEOUT)
                 await asyncio.sleep(random.uniform(2, 4))
                 
-                # Fill city
-                city_input = await page.wait_for_selector(
-                    'input[placeholder="Enter a city, airport, or landmark"]',
-                    timeout=15000
-                )
+                city_input = await page.wait_for_selector('input[placeholder="Enter a city, airport, or landmark"]', timeout=15000)
                 await city_input.click()
                 await asyncio.sleep(1)
-                await city_input.fill(city, force=True)
+                await city_input.fill(city)
                 await asyncio.sleep(2)
                 
-                # Select from dropdown
                 dropdown_options = await page.query_selector_all('ul[role="listbox"] li')
                 if dropdown_options:
                     await dropdown_options[0].click()
@@ -213,31 +234,18 @@ async def scrape_city_date(
                     await page.keyboard.press('Enter')
                 await asyncio.sleep(1)
                 
-                # Fill dates
-                checkin_input = await page.wait_for_selector('input[placeholder="Check-in"]', timeout=10000)
-                checkout_input = await page.wait_for_selector('input[placeholder="Check-out"]', timeout=10000)
+                checkin_str = checkin.strftime("%m/%d/%Y")
+                checkout_str = checkout.strftime("%m/%d/%Y")
                 
-                await checkin_input.click()
-                await checkin_input.fill(checkin.strftime("%m/%d/%Y"), force=True)
+                await page.evaluate(f'document.querySelector(\'input[placeholder="Check-in"]\').value = "{checkin_str}"')
+                await page.evaluate(f'document.querySelector(\'input[placeholder="Check-out"]\').value = "{checkout_str}"')
                 await asyncio.sleep(1)
                 
-                await checkout_input.click()
-                await checkout_input.fill(checkout.strftime("%m/%d/%Y"), force=True)
-                await asyncio.sleep(1)
-                
-                # Search
                 await page.get_by_role("button", name="Search").click()
                 
-                # Wait for results
-                try:
-                    await page.wait_for_url("**/search**", timeout=20000)
-                except:
-                    if "/search" not in page.url:
-                        raise Exception("Search failed")
-                        
+                await page.wait_for_url("**/search**", timeout=45000)
                 await asyncio.sleep(3)
                 
-                # Sort by highest miles
                 current_url = page.url
                 if "sort=" not in current_url:
                     sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
@@ -245,54 +253,32 @@ async def scrape_city_date(
                     sorted_url = re.sub(r'sort=[^&]*', 'sort=milesHighest', current_url)
                 
                 await page.goto(sorted_url, timeout=PAGE_TIMEOUT)
-                await asyncio.sleep(3)
+                await page.wait_for_selector('[data-testid="hotel-name"]', timeout=20000)
                 
-                # Find hotels
-                try:
-                    await page.wait_for_selector('[data-testid="hotel-name"]', timeout=10000)
-                    hotel_name_elements = await page.query_selector_all('[data-testid="hotel-name"]')
-                except:
-                    logging.info(f"No hotels found for {city} on {checkin}")
-                    return None
+                hotel_elements = await page.query_selector_all('div[data-testid^="hotel-card-"]')
                 
-                # Parse hotels
                 cheapest_10k = None
                 
-                for i, name_elem in enumerate(hotel_name_elements[:20]):
+                for card in hotel_elements[:20]:
                     try:
-                        name = await name_elem.text_content()
-                        
-                        # Get parent card
-                        card = await name_elem.evaluate_handle('el => el.closest("div[data-testid]") || el.parentElement?.parentElement?.parentElement')
-                        if not card:
-                            continue
-                        
-                        # Extract price
-                        price = None
+                        name_elem = await card.query_selector('[data-testid="hotel-name"]')
                         price_elem = await card.query_selector('[data-testid="earn-price"]')
-                        if price_elem:
-                            price_text = await price_elem.text_content()
-                            # Better price extraction
-                            price_match = re.search(r'[£€$¥₹]\s*([\d,]+\.?\d*)', price_text)
-                            if not price_match:
-                                price_match = re.search(r'([\d,]+\.?\d*)', price_text)
-                            if price_match:
-                                price = float(price_match.group(1).replace(',', ''))
-                        
-                        # Extract points
-                        points = None
                         miles_elem = await card.query_selector('[data-testid="tier-earn-rewards"]')
-                        if miles_elem:
-                            miles_text = await miles_elem.text_content()
-                            miles_numbers = re.findall(r'([\d,]+)', miles_text)
-                            if miles_numbers:
-                                all_numbers = [int(n.replace(',', '')) for n in miles_numbers]
-                                # Filter for reasonable point values
-                                valid_points = [n for n in all_numbers if n >= 1000]
-                                if valid_points:
-                                    points = max(valid_points)
+
+                        if not (name_elem and price_elem and miles_elem):
+                            continue
+
+                        name = await name_elem.text_content()
+                        price_text = await price_elem.text_content()
+                        miles_text = await miles_elem.text_content()
                         
-                        if name and price and points and points == 10000:
+                        price_match = re.search(r'([\d,]+\.?\d*)', price_text)
+                        price = float(price_match.group(1).replace(',', '')) if price_match else None
+                        
+                        miles_numbers = re.findall(r'([\d,]+)', miles_text)
+                        points = max([int(n.replace(',', '')) for n in miles_numbers if n] or [0])
+
+                        if name and price and points == 10000:
                             hotel_data = {
                                 'City': city,
                                 'Hotel': name.strip(),
@@ -300,28 +286,27 @@ async def scrape_city_date(
                                 'Points': points,
                                 'Check-in': checkin.strftime("%Y-%m-%d"),
                                 'Check-out': checkout.strftime("%Y-%m-%d"),
-                                'Cost per Point': price / points
+                                'Cost per Point': price / points if points > 0 else 0
                             }
-                            
                             if not cheapest_10k or price < cheapest_10k['Price']:
                                 cheapest_10k = hotel_data
                                 
                     except Exception as e:
-                        logging.debug(f"Error parsing hotel {i}: {e}")
+                        logging.debug(f"Error parsing hotel card: {e}")
                         continue
                 
                 return cheapest_10k
                 
         except Exception as e:
-            logging.warning(f"Attempt {attempt + 1} failed for {city}: {e}")
-            await proxy_manager.mark_proxy_failed(proxy)
+            logging.warning(f"Attempt {attempt + 1} for {city} on {checkin.date()} failed: {type(e).__name__} - {e}")
+            if use_proxy and proxy:
+                await proxy_manager.mark_proxy_failed(proxy)
             
         finally:
             if browser:
                 await browser.close()
                 
-        # Wait before retry
-        await asyncio.sleep(random.uniform(2, 5))
+        await asyncio.sleep(random.uniform(3, 6))
     
     return None
 
@@ -329,11 +314,11 @@ async def scrape_city(
     city: str,
     proxy_manager: ProxyManager,
     checkpoint_manager: CheckpointManager,
-    results_manager
+    results_manager,
+    use_proxy: bool
 ) -> Optional[Dict]:
     """Scrape all dates for a city"""
     
-    # Skip if already completed
     if checkpoint_manager.is_completed(city):
         logging.info(f"Skipping {city} - already completed")
         return None
@@ -342,27 +327,23 @@ async def scrape_city(
     city_cheapest = None
     
     for day in range(NUM_DATES):
-        checkin = datetime.now() + timedelta(days=day)
+        checkin = datetime.now() + timedelta(days=day + 1) # Start from tomorrow
         checkout = checkin + timedelta(days=NUM_NIGHTS)
         
-        result = await scrape_city_date(city, checkin, checkout, proxy_manager)
+        result = await scrape_city_date(city, checkin, checkout, proxy_manager, use_proxy)
         
         if result and (not city_cheapest or result['Price'] < city_cheapest['Price']):
             city_cheapest = result
         
-        # Small delay between dates
         await asyncio.sleep(random.uniform(1, 3))
     
-    # Save result
     if city_cheapest:
-        results_manager.add_result(city_cheapest)
+        await results_manager.add_result(city_cheapest)
         logging.info(f"✅ Found 10K hotel in {city}: {city_cheapest['Hotel']} - ${city_cheapest['Price']}")
     else:
         logging.info(f"❌ No 10K hotels found in {city}")
     
-    # Mark as completed
     checkpoint_manager.mark_completed(city)
-    
     return city_cheapest
 
 class ResultsManager:
@@ -392,87 +373,91 @@ async def worker(
     proxy_manager: ProxyManager,
     checkpoint_manager: CheckpointManager,
     results_manager: ResultsManager,
+    use_proxy: bool,
     worker_id: int
 ):
     """Worker coroutine for processing cities"""
     while True:
         try:
             city = await cities_queue.get()
-            if city is None:  # Sentinel value
+            if city is None:
                 break
                 
             logging.info(f"Worker {worker_id} processing {city}")
-            await scrape_city(city, proxy_manager, checkpoint_manager, results_manager)
+            await scrape_city(city, proxy_manager, checkpoint_manager, results_manager, use_proxy)
             
         except Exception as e:
-            logging.error(f"Worker {worker_id} error: {e}")
+            logging.error(f"Worker {worker_id} had a fatal error: {e}", exc_info=True)
         finally:
             cities_queue.task_done()
 
 async def main(
-    cities_file: str = "cities_top200.txt",
-    proxy_file: str = "webshare_proxies.txt",
-    batch_start: int = 0,
-    batch_size: int = None,
-    max_concurrent: int = MAX_CONCURRENT
+    cities_file: str,
+    proxy_file: str,
+    batch_start: int,
+    batch_size: Optional[int],
+    max_concurrent: int,
+    no_proxy: bool
 ):
     """Main scraping function"""
     
-    # Load cities
     with open(cities_file, 'r') as f:
         all_cities = [line.strip() for line in f if line.strip()]
     
-    # Apply batch processing if specified
-    if batch_size:
-        cities = all_cities[batch_start:batch_start + batch_size]
-        logging.info(f"Processing batch: cities {batch_start} to {batch_start + len(cities)}")
-    else:
-        cities = all_cities
+    cities_in_batch = all_cities
+    if batch_size is not None:
+        cities_in_batch = all_cities[batch_start : batch_start + batch_size]
+        logging.info(f"Processing batch: {len(cities_in_batch)} cities starting from index {batch_start}")
     
-    # Initialize managers
     proxy_manager = ProxyManager(proxy_file)
-    await proxy_manager.initialize()
-    
+    if not no_proxy:
+        try:
+            await proxy_manager.initialize()
+        except Exception as e:
+            logging.error(f"Failed to initialize Proxy Manager: {e}")
+            return # Exit if no proxies are working
+
     checkpoint_manager = CheckpointManager(CHECKPOINT_FILE)
     results_manager = ResultsManager(RESULTS_FILE)
     
-    # Filter out completed cities
-    cities_to_process = [c for c in cities if not checkpoint_manager.is_completed(c)]
-    logging.info(f"Cities to process: {len(cities_to_process)} out of {len(cities)}")
+    cities_to_process = [c for c in cities_in_batch if not checkpoint_manager.is_completed(c)]
+    logging.info(f"Cities to process in this run: {len(cities_to_process)}")
     
     if not cities_to_process:
-        logging.info("All cities already completed!")
+        logging.info("All cities in this batch are already completed!")
         return
     
-    # Create queue and workers
     cities_queue = asyncio.Queue()
     for city in cities_to_process:
         await cities_queue.put(city)
     
-    # Add sentinel values
     for _ in range(max_concurrent):
         await cities_queue.put(None)
     
-    # Start workers
     workers = [
         asyncio.create_task(
-            worker(cities_queue, proxy_manager, checkpoint_manager, results_manager, i)
+            worker(cities_queue, proxy_manager, checkpoint_manager, results_manager, not no_proxy, i)
         )
         for i in range(max_concurrent)
     ]
     
-    # Wait for completion
-    await asyncio.gather(*workers)
+    await cities_queue.join()
+
+    for w in workers:
+        w.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
     
-    logging.info(f"Scraping complete! Total results: {len(results_manager.results)}")
+    logging.info(f"Scraping complete! Total results in memory: {len(results_manager.results)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AA Hotels Scraper")
     parser.add_argument("--cities", default="cities_top200.txt", help="Cities file")
-    parser.add_argument("--proxies", default="webshare_proxies.txt", help="Proxies file")
+    parser.add_argument("--proxies", default="formatted_proxies.txt", help="Proxies file")
     parser.add_argument("--batch-start", type=int, default=0, help="Batch start index")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--concurrent", type=int, default=MAX_CONCURRENT, help="Max concurrent workers")
+    # --- ADDED A NO-PROXY FLAG FOR DEBUGGING ---
+    parser.add_argument("--no-proxy", action="store_true", help="Run the scraper without using proxies.")
     
     args = parser.parse_args()
     
@@ -481,5 +466,6 @@ if __name__ == "__main__":
         proxy_file=args.proxies,
         batch_start=args.batch_start,
         batch_size=args.batch_size,
-        max_concurrent=args.concurrent
+        max_concurrent=args.concurrent,
+        no_proxy=args.no_proxy
     ))
