@@ -138,12 +138,22 @@ jobs:
           echo "Running scraper for batch $BATCH_NUM..."
           echo "Batch start: $BATCH_START, size: $BATCH_SIZE"
           
-          # Run the scraper with correct arguments
+          # Make sure proxy file exists
+          if [ ! -f formatted_proxies.txt ]; then
+            echo "ERROR: Proxy file not found!"
+            exit 1
+          fi
+          
+          echo "Proxy file size: $(wc -c < formatted_proxies.txt) bytes"
+          echo "Proxy file lines: $(wc -l < formatted_proxies.txt)"
+          
+          # Run the scraper WITH PROXIES (no --no-proxy flag!)
           if python aa_hotels_scraper.py \
             --proxies formatted_proxies.txt \
             --cities cities_top200.txt \
             --batch-start ${BATCH_START} \
-            --batch-size ${BATCH_SIZE}; then
+            --batch-size ${BATCH_SIZE} \
+            --concurrent 3; then
             echo "Scraper completed successfully"
             echo "status=success" >> $GITHUB_OUTPUT
             
