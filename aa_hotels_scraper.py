@@ -66,18 +66,22 @@ class ProxyManager:
                     cleaned_line = line.replace("http://", "").replace("https://", "")
 
                     # Check for the user:pass@host:port format
-                    if '@' in cleaned_line:
-                        try:
-                            creds_part, host_part = cleaned_line.split('@', 1)
-                            user, pwd = creds_part.split(':', 1)
-                            host, port = host_part.split(':', 1)
-                            print(f'LIVE DEBUG: host="{host}", port="{port}", final_server="{f"http://{host}:{port}"}"')
-                            proxies.append(Proxy(
-                                server=f"http://{host}:{port}",
-                                username=user,
-                                password=pwd
-                            ))
-                            continue  # Successfully parsed, move to the next line
+               if '@' in cleaned_line:
+    try:
+        creds_part, host_part = cleaned_line.split('@', 1)
+        user, pwd = creds_part.split(':', 1)
+        host, port = host_part.split(':', 1)
+        print(f'LIVE DEBUG: host=\"{host}\", port=\"{port}\", final_server=\"{f'http://{host}:{port}'}\"")
+        proxies.append(Proxy(
+            server=f"http://{host}:{port}",
+            username=user,
+            password=pwd
+        ))
+        continue  # Successfully parsed, move to the next line
+    except ValueError:
+        logging.warning(f"Skipping malformed proxy line #{i+1} (format user:pass@host:port). Line: '{line}'")
+        continue
+
                         except ValueError:
                             logging.warning(f"Skipping malformed proxy line #{i+1} (format user:pass@host:port). Line: '{line}'")
                             continue
