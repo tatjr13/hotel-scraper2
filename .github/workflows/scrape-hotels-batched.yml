@@ -93,51 +93,56 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: results
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pandas
 
-    - name: Combine results
-      run: |
-        python - << 'EOF'
-        import pandas as pd
-        import glob
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: results
 
-        csv_files = glob.glob('results/*/cheapest_10k_hotels_by_city.csv')
-        if not csv_files:
-            print("No results found!")
-            exit(1)
-        dfs = [pd.read_csv(f) for f in csv_files]
-        combined = pd.concat(dfs, ignore_index=True)
-        combined = combined.drop_duplicates(subset=['City'], keep='first')
-        combined = combined.sort_values('Cost per Point')
-        combined.to_csv('final_cheapest_10k_hotels.csv', index=False)
-        print(f"Combined {len(dfs)} result files")
-        print(f"Total unique cities: {len(combined)}")
-        print(combined.head(10)[['City', 'Hotel', 'Price', 'Cost per Point']])
-        EOF
+      - name: Combine results
+        run: |
+          python - << 'EOF'
+          import pandas as pd
+          import glob
 
-    - name: Upload final results
-      uses: actions/upload-artifact@v4
-      with:
-        name: final-results-${{ github.run_number }}
-        path: final_cheapest_10k_hotels.csv
-        retention-days: 30
+          csv_files = glob.glob('results/*/cheapest_10k_hotels_by_city.csv')
+          if not csv_files:
+              print("No results found!")
+              exit(1)
+          dfs = [pd.read_csv(f) for f in csv_files]
+          combined = pd.concat(dfs, ignore_index=True)
+          combined = combined.drop_duplicates(subset=['City'], keep='first')
+          combined = combined.sort_values('Cost per Point')
+          combined.to_csv('final_cheapest_10k_hotels.csv', index=False)
+          print(f"Combined {len(dfs)} result files")
+          print(f"Total unique cities: {len(combined)}")
+          print(combined.head(10)[['City', 'Hotel', 'Price', 'Cost per Point']])
+          EOF
 
-    - name: Create summary
-      run: |
-        echo "# Scraping Results Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## Top Deals Found" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "| City | Hotel | Price | Cost/Point |" >> $GITHUB_STEP_SUMMARY
-        echo "|------|-------|-------|------------|" >> $GITHUB_STEP_SUMMARY
-        head -11 final_cheapest_10k_hotels.csv | tail -10 | awk -F',' '{printf "| %s | %s | $%.2f | $%.4f |\n", $1, $2, $3, $6}' >> $GITHUB_STEP_SUMMARY
+      - name: Upload final results
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-results-${{ github.run_number }}
+          path: final_cheapest_10k_hotels.csv
+          retention-days: 30
+
+      - name: Create summary
+        run: |
+          echo "# Scraping Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Top Deals Found" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| City | Hotel | Price | Cost/Point |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|-------|------------|" >> $GITHUB_STEP_SUMMARY
+          head -11 final_cheapest_10k_hotels.csv | tail -10 | awk -F',' '{printf "| %s | %s | $%.2f | $%.4f |\n", $1, $2, $3, $6}' >> $GITHUB_STEP_SUMMARY
