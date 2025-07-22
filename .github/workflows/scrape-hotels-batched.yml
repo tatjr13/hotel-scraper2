@@ -80,6 +80,14 @@ jobs:
           fi
           echo "Proxy file decrypted successfully"
 
+      # --- NEW DEBUGGING STEP ---
+      # This will print the top of the scraper file to the log.
+      - name: Verify Scraper Code Content
+        run: |
+          echo "--- Displaying top of aa_hotels_scraper.py ---"
+          head -n 90 aa_hotels_scraper.py
+          echo "----------------------------------------------"
+
       - name: Run scraper for batch
         id: run-scraper
         continue-on-error: true
