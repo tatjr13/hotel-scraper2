@@ -55,49 +55,56 @@ class ProxyManager:
         """Load proxies from file, robustly handling multiple formats."""
         proxies = []
         logging.info(f"Attempting to load proxies from {proxy_file}...")
-        try:
-            with open(proxy_file, 'r') as f:
-                for i, line in enumerate(f):
-                    line = line.strip()
-                    if not line:
-                        continue
+        
+        if not os.path.exists(proxy_file):
+            logging.error(f"Proxy file not found: {proxy_file}")
+            return proxies
+            
+        with open(proxy_file, 'r') as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
 
-                    # Clean the line by removing any protocol prefixes
-                    cleaned_line = line.replace("http://", "").replace("https://", "")
+                # Clean the line by removing any protocol prefixes
+                cleaned_line = line.replace("http://", "").replace("https://", "")
 
-                    # Check for the user:pass@host:port format
-                    if '@' in cleaned_line:
-                        try:
-                            creds_part, host_part = cleaned_line.split('@', 1)
-                            user, pwd = creds_part.split(':', 1)
-                            host, port = host_part.split(':', 1)
-                            print(f'LIVE DEBUG: host="{host}", port="{port}", final_server="{f"http://{host}:{port}"}"')
-                            proxies.append(Proxy(
-                                server=f"http://{host}:{port}",
-                                username=user,
-                                password=pwd
-                            ))
-                            continue  # Successfully parsed, move to the next line
-                        except ValueError:
-                            logging.warning(f"Skipping malformed proxy line #{i+1} (format user:pass@host:port). Line: '{line}'")
-                            continue
-                    
-                    # Fallback to check for host:port:user:pass format
-                    parts = cleaned_line.split(':')
-                    if len(parts) == 4:
-                        host, port, user, pwd = parts
-                        print(f'LIVE DEBUG: host="{host}", port="{port}", final_server="{f"http://{host}:{port}"}"')
+                # Check for the user:pass@host:port format
+                if '@' in cleaned_line:
+                    try:
+                        creds_part, host_part = cleaned_line.split('@', 1)
+                        user, pwd = creds_part.split(':', 1)
+                        host, port = host_part.split(':', 1)
+                        
+                        server_url = f"http://{host}:{port}"
+                        logging.debug(f'Parsed proxy: host="{host}", port="{port}", server="{server_url}"')
+                        
                         proxies.append(Proxy(
-                            server=f"http://{host}:{port}",
+                            server=server_url,
                             username=user,
                             password=pwd
                         ))
-                    else:
-                        logging.warning(f"Skipping malformed proxy line #{i+1}. Could not parse. Expected format 'host:port:user:pass' or 'user:pass@host:port'. Line: '{line}'")
-            
-            logging.info(f"Successfully loaded {len(proxies)} valid proxies.")
-        except FileNotFoundError:
-            logging.error(f"Proxy file not found: {proxy_file}")
+                        continue
+                    except ValueError as e:
+                        logging.warning(f"Skipping malformed proxy line #{i+1} (expected user:pass@host:port): {line}")
+                        continue
+                
+                # Fallback to check for host:port:user:pass format
+                parts = cleaned_line.split(':')
+                if len(parts) == 4:
+                    host, port, user, pwd = parts
+                    server_url = f"http://{host}:{port}"
+                    logging.debug(f'Parsed proxy: host="{host}", port="{port}", server="{server_url}"')
+                    
+                    proxies.append(Proxy(
+                        server=server_url,
+                        username=user,
+                        password=pwd
+                    ))
+                else:
+                    logging.warning(f"Skipping malformed proxy line #{i+1}. Expected format 'host:port:user:pass' or 'user:pass@host:port'. Line: '{line}'")
+        
+        logging.info(f"Successfully loaded {len(proxies)} valid proxies.")
         
         if not proxies:
             logging.error("No valid proxies could be loaded from the file. Please check the file format.")
