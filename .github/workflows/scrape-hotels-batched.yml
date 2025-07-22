@@ -1,3 +1,37 @@
+name: Scrape Hotels - Batched
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'Number of cities per batch'
+        required: false
+        default: '2'
+      max_concurrent:
+        description: 'Max concurrent scrapers'
+        required: false
+        default: '1'
+
+jobs:
+  calculate-batches:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Calculate batch matrix
+      id: set-matrix
+      run: |
+        TOTAL_CITIES=$(wc -l < cities_top200.txt)
+        BATCH_SIZE=${{ github.event.inputs.batch_size || '2' }}
+        BATCHES=()
+        for ((i=0; i<$TOTAL_CITIES; i+=$BATCH_SIZE)); do
+          BATCHES+=("{\"start\": $i, \"size\": $BATCH_SIZE}")
+        done
+        MATRIX=$(printf '%s,' "${BATCHES[@]}" | sed 's/,$//')
+        echo "matrix={\"batch\": [$MATRIX]}" >> $GITHUB_OUTPUT
+
   scrape-batch:
     needs: calculate-batches
     runs-on: ubuntu-latest
