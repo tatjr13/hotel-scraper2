@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+scraper-venv/
+venv/
+.env
+
+# OS files
+.DS_Store
+
+# Proxy files - DO NOT LEAK!
+webshare_proxies*.txt
+formatted_proxies.txt
+working_proxies.txt
+
+# Logs and checkpoints
+*.log
+checkpoint.json
+
+# Results and artifacts
+*.csv
+*.json
+
+# Ignore secrets
+*.enc
