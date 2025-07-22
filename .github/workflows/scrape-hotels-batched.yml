@@ -6,13 +6,11 @@ on:
       batch_size:
         description: 'Number of cities per batch'
         required: false
-        default: '50'
+        default: '2'
       max_concurrent:
         description: 'Max concurrent scrapers'
         required: false
-        default: '5'
-  schedule:
-    - cron: '0 2 * * *'  # runs daily at 2AM UTC
+        default: '1'
 
 jobs:
   calculate-batches:
@@ -20,73 +18,53 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Calculate batch matrix
-      id: set-matrix
-      run: |
-        TOTAL_CITIES=$(wc -l < cities_top200.txt)
-        BATCH_SIZE=${{ github.event.inputs.batch_size || '50' }}
-        BATCHES=()
-        for ((i=0; i<$TOTAL_CITIES; i+=$BATCH_SIZE)); do
-          BATCHES+=("{\"start\": $i, \"size\": $BATCH_SIZE}")
-        done
-        MATRIX=$(printf '%s,' "${BATCHES[@]}" | sed 's/,$//')
-        echo "matrix={\"batch\": [$MATRIX]}" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v4
+      - id: set-matrix
+        run: |
+          TOTAL_CITIES=$(wc -l < cities_top200.txt)
+          BATCH_SIZE=${{ github.event.inputs.batch_size || '2' }}
+          echo "TOTAL_CITIES: $TOTAL_CITIES"
+          echo "BATCH_SIZE: $BATCH_SIZE"
+          BATCHES=()
+          for ((i=0; i<$TOTAL_CITIES; i+=$BATCH_SIZE)); do
+            BATCHES+=("{\"start\": $i, \"size\": $BATCH_SIZE}")
+          done
+          MATRIX="{\"batch\": [$(IFS=,; echo "${BATCHES[*]}")]}"
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "DEBUG MATRIX: $MATRIX"
+      # This prints out the matrix so you can see if it's empty
+      - run: echo "Matrix is: ${{ steps.set-matrix.outputs.matrix }}"
 
   scrape-batch:
     needs: calculate-batches
     runs-on: ubuntu-latest
-    timeout-minutes: 120
     strategy:
       matrix: ${{ fromJson(needs.calculate-batches.outputs.matrix) }}
-      max-parallel: ${{ github.event.inputs.max_concurrent || 5 }}
+      max-parallel: 1
       fail-fast: false
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-
-    - name: Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Decrypt proxies file
-      env:
-        PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
-      run: |
-        openssl enc -d -aes-256-cbc -pbkdf2 -in formatted_proxies.txt.enc -out formatted_proxies.txt -k "$PROXY_PASSWORD"
-
-    - name: Run scraper for batch
-      env:
-        MAX_CONCURRENT: ${{ github.event.inputs.max_concurrent || '5' }}
-      run: |
-        echo "Processing batch: start=${{ matrix.batch.start }}, size=${{ matrix.batch.size }}"
-        python aa_hotels_scraper.py \
-          --batch-start ${{ matrix.batch.start }} \
-          --batch-size ${{ matrix.batch.size }} \
-          --concurrent $MAX_CONCURRENT
-
-    - name: Upload results
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: results-batch-${{ matrix.batch.start }}
-        path: |
-          cheapest_10k_hotels_by_city.csv
-          checkpoint.json
-          scraper.log
-
-    - name: Upload checkpoint for reuse
-      if: always()
-      uses: actions/cache@v4
-      with:
-        path: checkpoint.json
-        key: checkpoint-${{ github.run_id }}-${{ matrix.batch.start }}
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run scraper for batch
+        env:
+          MAX_CONCURRENT: ${{ github.event.inputs.max_concurrent || '1' }}
+        run: |
+          echo "Processing batch: start=${{ matrix.batch.start }}, size=${{ matrix.batch.size }}"
+          python aa_hotels_scraper.py
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-batch-${{ matrix.batch.start }}
+          path: |
+            cheapest_10k_hotels_by_city.csv
 
   combine-results:
     needs: scrape-batch
@@ -94,28 +72,21 @@ jobs:
     if: always()
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install pandas
-
+        run: pip install pandas
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: results
-
       - name: Combine results
         run: |
           python - << 'EOF'
           import pandas as pd
           import glob
-
           csv_files = glob.glob('results/*/cheapest_10k_hotels_by_city.csv')
           if not csv_files:
               print("No results found!")
@@ -125,24 +96,9 @@ jobs:
           combined = combined.drop_duplicates(subset=['City'], keep='first')
           combined = combined.sort_values('Cost per Point')
           combined.to_csv('final_cheapest_10k_hotels.csv', index=False)
-          print(f"Combined {len(dfs)} result files")
-          print(f"Total unique cities: {len(combined)}")
-          print(combined.head(10)[['City', 'Hotel', 'Price', 'Cost per Point']])
           EOF
-
       - name: Upload final results
         uses: actions/upload-artifact@v4
         with:
           name: final-results-${{ github.run_number }}
           path: final_cheapest_10k_hotels.csv
-          retention-days: 30
-
-      - name: Create summary
-        run: |
-          echo "# Scraping Results Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Top Deals Found" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| City | Hotel | Price | Cost/Point |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-------|-------|------------|" >> $GITHUB_STEP_SUMMARY
-          head -11 final_cheapest_10k_hotels.csv | tail -10 | awk -F',' '{printf "| %s | %s | $%.2f | $%.4f |\n", $1, $2, $3, $6}' >> $GITHUB_STEP_SUMMARY
