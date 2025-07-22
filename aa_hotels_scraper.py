@@ -24,8 +24,8 @@ logging.basicConfig(
 )
 
 # Configuration
-PROXY_TIMEOUT = 20 
-PAGE_TIMEOUT = 30000
+PROXY_TIMEOUT = 30
+PAGE_TIMEOUT = 60000
 NUM_NIGHTS = 1
 NUM_DATES = 3
 CHECKPOINT_FILE = "checkpoint.json"
@@ -134,7 +134,7 @@ class ProxyManager:
             logging.warning(f"Proxy {proxy.server} test failed: {type(e).__name__}")
             return False
     
-    async def initialize(self, sample_size: int = 100):
+    async def initialize(self, sample_size: int = 200):
         """Test a sample of proxies to find working ones"""
         if not self.proxies:
             raise Exception("Proxy list is empty or contains no valid proxies.")
@@ -142,14 +142,27 @@ class ProxyManager:
         logging.info(f"Testing a random sample of {min(sample_size, len(self.proxies))} proxies...")
         sample = random.sample(self.proxies, min(sample_size, len(self.proxies)))
         
-        tasks = [self.test_proxy(proxy) for proxy in sample]
-        results = await asyncio.gather(*tasks)
+        # Test in smaller batches to avoid overwhelming
+        batch_size = 50
+        self.working_proxies = []
         
-        self.working_proxies = [
-            proxy for proxy, is_working in zip(sample, results) if is_working
-        ]
+        for i in range(0, len(sample), batch_size):
+            batch = sample[i:i + batch_size]
+            tasks = [self.test_proxy(proxy) for proxy in batch]
+            results = await asyncio.gather(*tasks)
+            
+            working_batch = [
+                proxy for proxy, is_working in zip(batch, results) if is_working
+            ]
+            self.working_proxies.extend(working_batch)
+            
+            logging.info(f"Batch {i//batch_size + 1}: Found {len(working_batch)} working proxies")
+            
+            # Stop if we have enough working proxies
+            if len(self.working_proxies) >= 100:
+                break
         
-        logging.info(f"Found {len(self.working_proxies)} working proxies out of {len(sample)} tested.")
+        logging.info(f"Total found {len(self.working_proxies)} working proxies out of {len(sample)} tested.")
         
         if not self.working_proxies:
             raise Exception("No working proxies found from the tested sample!")
@@ -269,29 +282,94 @@ async def scrape_city_date(
                 await page.evaluate(f'document.querySelector(\'input[placeholder="Check-out"]\').value = "{checkout_str}"')
                 await asyncio.sleep(1)
                 
-                await page.get_by_role("button", name="Search").click()
+                # Click search and wait for either navigation OR content change
+                search_button = await page.get_by_role("button", name="Search")
                 
-                await page.wait_for_url("**/search**", timeout=45000)
-                await asyncio.sleep(3)
+                # Instead of waiting for navigation, wait for results to appear
+                try:
+                    # Click and wait for either navigation or hotel results
+                    await search_button.click()
+                    
+                    # Wait for EITHER URL change OR hotel cards to appear
+                    await page.wait_for_function(
+                        """() => {
+                            // Check if URL contains search
+                            if (window.location.href.includes('search')) return true;
+                            // Check if hotel cards are present
+                            if (document.querySelector('[data-testid="hotel-name"]')) return true;
+                            if (document.querySelector('[data-testid^="hotel-card-"]')) return true;
+                            // Check for any results container
+                            if (document.querySelector('.hotel-results')) return true;
+                            if (document.querySelector('#results')) return true;
+                            return false;
+                        }""",
+                        timeout=45000
+                    )
+                    
+                    logging.info(f"Search completed for {city}")
+                    await asyncio.sleep(3)  # Let results fully load
+                    
+                except Exception as e:
+                    logging.warning(f"Search might have failed: {e}")
+                    # Continue anyway in case results loaded
                 
+                # Check current URL
                 current_url = page.url
-                if "sort=" not in current_url:
-                    sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
-                else:
-                    sorted_url = re.sub(r'sort=[^&]*', 'sort=milesHighest', current_url)
+                logging.debug(f"Current URL: {current_url}")
                 
-                await page.goto(sorted_url, timeout=PAGE_TIMEOUT)
-                await page.wait_for_selector('[data-testid="hotel-name"]', timeout=20000)
+                # Try to sort by miles if we're on a search page
+                if "search" in current_url or "results" in current_url:
+                    if "sort=" not in current_url:
+                        sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
+                    else:
+                        sorted_url = re.sub(r'sort=[^&]*', 'sort=milesHighest', current_url)
+                    
+                    try:
+                        await page.goto(sorted_url, timeout=PAGE_TIMEOUT)
+                        await asyncio.sleep(2)
+                    except:
+                        logging.debug("Could not navigate to sorted URL")
                 
-                hotel_elements = await page.query_selector_all('div[data-testid^="hotel-card-"]')
+                # Look for hotel cards with multiple possible selectors
+                hotel_selectors = [
+                    'div[data-testid^="hotel-card-"]',
+                    '[data-testid="hotel-card"]',
+                    '.hotel-card',
+                    '.property-card',
+                    'article[class*="hotel"]',
+                    'div[class*="property"]'
+                ]
+                
+                hotel_elements = []
+                for selector in hotel_selectors:
+                    hotel_elements = await page.query_selector_all(selector)
+                    if hotel_elements:
+                        logging.info(f"Found {len(hotel_elements)} hotels with selector: {selector}")
+                        break
+                
+                if not hotel_elements:
+                    logging.warning(f"No hotel cards found for {city}")
+                    # Take a screenshot for debugging
+                    await page.screenshot(path=f"no_hotels_{city.replace(',', '').replace(' ', '_')}.png")
+                    return None
                 
                 cheapest_10k = None
                 
                 for card in hotel_elements[:20]:
                     try:
-                        name_elem = await card.query_selector('[data-testid="hotel-name"]')
-                        price_elem = await card.query_selector('[data-testid="earn-price"]')
-                        miles_elem = await card.query_selector('[data-testid="tier-earn-rewards"]')
+                        # Try multiple selectors for hotel details
+                        name_elem = await card.query_selector('[data-testid="hotel-name"]') or \
+                                   await card.query_selector('.hotel-name') or \
+                                   await card.query_selector('h3') or \
+                                   await card.query_selector('[class*="property-name"]')
+                        
+                        price_elem = await card.query_selector('[data-testid="earn-price"]') or \
+                                    await card.query_selector('[class*="price"]') or \
+                                    await card.query_selector('[data-testid="price"]')
+                        
+                        miles_elem = await card.query_selector('[data-testid="tier-earn-rewards"]') or \
+                                    await card.query_selector('[class*="miles"]') or \
+                                    await card.query_selector('[class*="points"]')
 
                         if not (name_elem and price_elem and miles_elem):
                             continue
@@ -326,7 +404,7 @@ async def scrape_city_date(
                 return cheapest_10k
                 
         except Exception as e:
-            logging.warning(f"Attempt {attempt + 1} for {city} on {checkin.date()} failed: {type(e).__name__}")
+            logging.warning(f"Attempt {attempt + 1} for {city} on {checkin.date()} failed: {type(e).__name__}: {str(e)}")
             if use_proxy and proxy:
                 await proxy_manager.mark_proxy_failed(proxy)
             
