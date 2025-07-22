@@ -135,14 +135,26 @@ class ProxyManager:
             return False
     
     async def initialize(self, sample_size: int = 200):
-        """Test a sample of proxies to find working ones"""
+        """Initialize proxies - for WebShare, skip testing as they often fail tests but work in practice"""
         if not self.proxies:
             raise Exception("Proxy list is empty or contains no valid proxies.")
 
+        logging.info(f"Loading {len(self.proxies)} proxies...")
+        
+        # For WebShare proxies, don't test them - just use them
+        # WebShare proxies often fail basic tests but work for actual browsing
+        if self.proxies and 'webshare' in self.proxies[0].server:
+            logging.info("Detected WebShare proxies - skipping test phase")
+            # Just use a random sample of proxies
+            self.working_proxies = random.sample(self.proxies, min(100, len(self.proxies)))
+            logging.info(f"Using {len(self.working_proxies)} WebShare proxies without testing")
+            return
+        
+        # For other proxy providers, test as normal
         logging.info(f"Testing a random sample of {min(sample_size, len(self.proxies))} proxies...")
         sample = random.sample(self.proxies, min(sample_size, len(self.proxies)))
         
-        # Test in smaller batches to avoid overwhelming
+        # Test in smaller batches
         batch_size = 50
         self.working_proxies = []
         
@@ -165,7 +177,8 @@ class ProxyManager:
         logging.info(f"Total found {len(self.working_proxies)} working proxies out of {len(sample)} tested.")
         
         if not self.working_proxies:
-            raise Exception("No working proxies found from the tested sample!")
+            logging.warning("No working proxies found from tests, using untested proxies")
+            self.working_proxies = sample[:50]
     
     async def get_proxy(self) -> Optional[Proxy]:
         """Get next working proxy"""
