@@ -71,6 +71,7 @@ class ProxyManager:
                             creds_part, host_part = cleaned_line.split('@', 1)
                             user, pwd = creds_part.split(':', 1)
                             host, port = host_part.split(':', 1)
+                            print(f'LIVE DEBUG: host="{host}", port="{port}", final_server="{f"http://{host}:{port}"}"')
                             proxies.append(Proxy(
                                 server=f"http://{host}:{port}",
                                 username=user,
@@ -85,6 +86,7 @@ class ProxyManager:
                     parts = cleaned_line.split(':')
                     if len(parts) == 4:
                         host, port, user, pwd = parts
+                        print(f'LIVE DEBUG: host="{host}", port="{port}", final_server="{f"http://{host}:{port}"}"')
                         proxies.append(Proxy(
                             server=f"http://{host}:{port}",
                             username=user,
