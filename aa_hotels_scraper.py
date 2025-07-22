@@ -23,19 +23,16 @@ logging.basicConfig(
     ]
 )
 
-# --- MODIFIED CONFIGURATION ---
-# Increased timeout to give slow proxies a better chance.
+# Configuration
 PROXY_TIMEOUT = 20 
 PAGE_TIMEOUT = 30000
-# --- END MODIFICATION ---
-
 NUM_NIGHTS = 1
 NUM_DATES = 3
 CHECKPOINT_FILE = "checkpoint.json"
 RESULTS_FILE = "cheapest_10k_hotels_by_city.csv"
 PROXY_TEST_URL = "https://httpbin.org/ip"
 MAX_RETRIES = 3
-MAX_CONCURRENT = int(os.environ.get('MAX_CONCURRENT', '5'))  # Configurable concurrency
+MAX_CONCURRENT = int(os.environ.get('MAX_CONCURRENT', '5'))
 
 @dataclass
 class Proxy:
@@ -55,7 +52,7 @@ class ProxyManager:
         self.lock = asyncio.Lock()
         
     def _load_proxies(self, proxy_file: str) -> List[Proxy]:
-        """Load proxies from file"""
+        """Load proxies from file, handling existing http prefixes."""
         proxies = []
         try:
             with open(proxy_file, 'r') as f:
@@ -63,8 +60,18 @@ class ProxyManager:
                     line = line.strip()
                     if line and line.count(":") == 3:
                         host, port, user, pwd = line.split(":")
+                        
+                        # --- THIS IS THE FIX ---
+                        # Strip any existing http:// or https:// prefix from the host.
+                        # This prevents creating an invalid URL like "http://http://...".
+                        if host.startswith("http://"):
+                            host = host[7:]
+                        elif host.startswith("https://"):
+                            host = host[8:]
+                        # --- END OF FIX ---
+
                         proxies.append(Proxy(
-                            server=f"http://{host}:{port}",
+                            server=f"http://{host}:{port}", # This will now be correct.
                             username=user,
                             password=pwd
                         ))
@@ -84,30 +91,25 @@ class ProxyManager:
                     PROXY_TEST_URL,
                     proxy=proxy.server,
                     proxy_auth=auth,
-                    ssl=False # Added for broader compatibility
+                    ssl=False
                 ) as response:
                     if response.status == 200:
                         logging.info(f"Proxy {proxy.server} is working.")
                         return True
                     else:
-                        # --- MODIFIED LOGGING ---
-                        # Log the failing status code for better diagnostics.
                         logging.warning(f"Proxy {proxy.server} test failed with status: {response.status}")
                         return False
         except Exception as e:
-            # --- MODIFIED LOGGING ---
-            # Log the specific exception to know WHY it failed (e.g., TimeoutError).
             logging.warning(f"Proxy {proxy.server} test failed: {type(e).__name__} - {e}")
             return False
     
-    async def initialize(self, sample_size: int = 100): # --- INCREASED SAMPLE SIZE ---
+    async def initialize(self, sample_size: int = 100):
         """Test a sample of proxies to find working ones"""
         if not self.proxies:
             logging.error("Proxy list is empty. Cannot initialize.")
             raise Exception("Proxy list is empty.")
 
-        logging.info(f"Testing a random sample of {sample_size} proxies...")
-        # Ensure sample_size is not larger than the number of proxies available.
+        logging.info(f"Testing a random sample of {min(sample_size, len(self.proxies))} proxies...")
         sample = random.sample(self.proxies, min(sample_size, len(self.proxies)))
         
         tasks = [self.test_proxy(proxy) for proxy in sample]
@@ -135,7 +137,6 @@ class ProxyManager:
             if proxy.failures > 3:
                 self.working_proxies.remove(proxy)
                 logging.warning(f"Removed consistently failing proxy: {proxy.server}")
-                # Try to get the next one in the list
                 return await self.get_proxy() if self.working_proxies else None
                 
             return proxy
@@ -144,8 +145,6 @@ class ProxyManager:
         """Mark proxy as failed"""
         async with self.lock:
             proxy.failures += 1
-
-# ... (The rest of the file remains the same) ...
 
 class CheckpointManager:
     """Manages progress checkpointing"""
@@ -327,7 +326,7 @@ async def scrape_city(
     city_cheapest = None
     
     for day in range(NUM_DATES):
-        checkin = datetime.now() + timedelta(days=day + 1) # Start from tomorrow
+        checkin = datetime.now() + timedelta(days=day + 1)
         checkout = checkin + timedelta(days=NUM_NIGHTS)
         
         result = await scrape_city_date(city, checkin, checkout, proxy_manager, use_proxy)
@@ -415,7 +414,7 @@ async def main(
             await proxy_manager.initialize()
         except Exception as e:
             logging.error(f"Failed to initialize Proxy Manager: {e}")
-            return # Exit if no proxies are working
+            return
 
     checkpoint_manager = CheckpointManager(CHECKPOINT_FILE)
     results_manager = ResultsManager(RESULTS_FILE)
@@ -456,7 +455,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch-start", type=int, default=0, help="Batch start index")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--concurrent", type=int, default=MAX_CONCURRENT, help="Max concurrent workers")
-    # --- ADDED A NO-PROXY FLAG FOR DEBUGGING ---
     parser.add_argument("--no-proxy", action="store_true", help="Run the scraper without using proxies.")
     
     args = parser.parse_args()
