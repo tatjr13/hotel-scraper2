@@ -52,7 +52,7 @@ class ProxyManager:
         self.lock = asyncio.Lock()
         
     def _load_proxies(self, proxy_file: str) -> List[Proxy]:
-        """Load proxies from file, robustly handling different formats."""
+        """Load proxies from file, robustly handling multiple formats."""
         proxies = []
         logging.info(f"Attempting to load proxies from {proxy_file}...")
         try:
@@ -65,9 +65,25 @@ class ProxyManager:
                     # Clean the line by removing any protocol prefixes
                     cleaned_line = line.replace("http://", "").replace("https://", "")
 
-                    parts = cleaned_line.split(':')
+                    # Check for the user:pass@host:port format
+                    if '@' in cleaned_line:
+                        try:
+                            creds_part, host_part = cleaned_line.split('@', 1)
+                            user, pwd = creds_part.split(':', 1)
+                            host, port = host_part.split(':', 1)
+                            proxies.append(Proxy(
+                                server=f"http://{host}:{port}",
+                                username=user,
+                                password=pwd
+                            ))
+                            continue  # Successfully parsed, move to the next line
+                        except ValueError:
+                            # This will catch errors if the splits don't work as expected
+                            logging.warning(f"Skipping malformed proxy line #{i+1} (format user:pass@host:port). Line: '{line}'")
+                            continue
                     
-                    # We expect 4 parts: host, port, user, pass
+                    # Fallback to check for host:port:user:pass format
+                    parts = cleaned_line.split(':')
                     if len(parts) == 4:
                         host, port, user, pwd = parts
                         proxies.append(Proxy(
@@ -76,7 +92,7 @@ class ProxyManager:
                             password=pwd
                         ))
                     else:
-                        logging.warning(f"Skipping malformed proxy line #{i+1}. Expected 4 parts (host:port:user:pass), found {len(parts)}. Line: '{line}'")
+                        logging.warning(f"Skipping malformed proxy line #{i+1}. Could not parse. Expected format 'host:port:user:pass' or 'user:pass@host:port'. Line: '{line}'")
             
             logging.info(f"Successfully loaded {len(proxies)} valid proxies.")
         except FileNotFoundError:
