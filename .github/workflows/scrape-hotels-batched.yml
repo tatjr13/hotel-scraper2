@@ -23,41 +23,58 @@ jobs:
         run: |
           TOTAL_CITIES=$(wc -l < cities_top200.txt)
           BATCH_SIZE=${{ github.event.inputs.batch_size || '2' }}
-          echo "TOTAL_CITIES: $TOTAL_CITIES"
-          echo "BATCH_SIZE: $BATCH_SIZE"
           BATCHES=()
           for ((i=0; i<$TOTAL_CITIES; i+=$BATCH_SIZE)); do
             BATCHES+=("{\"start\": $i, \"size\": $BATCH_SIZE}")
           done
           MATRIX="{\"batch\": [$(IFS=,; echo "${BATCHES[*]}")]}"
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "DEBUG MATRIX: $MATRIX"
-      # This prints out the matrix so you can see if it's empty
+          echo "MATRIX: $MATRIX"
       - run: echo "Matrix is: ${{ steps.set-matrix.outputs.matrix }}"
 
   scrape-batch:
     needs: calculate-batches
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix: ${{ fromJson(needs.calculate-batches.outputs.matrix) }}
       max-parallel: 1
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Decrypt proxies file
+        env:
+          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+        run: |
+          if [ -f formatted_proxies.txt.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in formatted_proxies.txt.enc -out formatted_proxies.txt -k "$PROXY_PASSWORD"
+            echo "Decrypted proxies file."
+          else
+            echo "No encrypted proxies file found, skipping decryption."
+          fi
+
       - name: Run scraper for batch
         env:
           MAX_CONCURRENT: ${{ github.event.inputs.max_concurrent || '1' }}
         run: |
-          echo "Processing batch: start=${{ matrix.batch.start }}, size=${{ matrix.batch.size }}"
-          python aa_hotels_scraper.py
+          python aa_hotels_scraper.py \
+            --batch-start ${{ matrix.batch.start }} \
+            --batch-size ${{ matrix.batch.size }} \
+            --proxies formatted_proxies.txt \
+            --cities cities_top200.txt \
+            --concurrent $MAX_CONCURRENT
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,18 +102,18 @@ jobs:
       - name: Combine results
         run: |
           python - << 'EOF'
-          import pandas as pd
-          import glob
-          csv_files = glob.glob('results/*/cheapest_10k_hotels_by_city.csv')
-          if not csv_files:
-              print("No results found!")
-              exit(1)
-          dfs = [pd.read_csv(f) for f in csv_files]
-          combined = pd.concat(dfs, ignore_index=True)
-          combined = combined.drop_duplicates(subset=['City'], keep='first')
-          combined = combined.sort_values('Cost per Point')
-          combined.to_csv('final_cheapest_10k_hotels.csv', index=False)
-          EOF
+import pandas as pd
+import glob
+csv_files = glob.glob('results/*/cheapest_10k_hotels_by_city.csv')
+if not csv_files:
+    print("No results found!")
+    exit(1)
+dfs = [pd.read_csv(f) for f in csv_files]
+combined = pd.concat(dfs, ignore_index=True)
+combined = combined.drop_duplicates(subset=['City'], keep='first')
+combined = combined.sort_values('Cost per Point')
+combined.to_csv('final_cheapest_10k_hotels.csv', index=False)
+EOF
       - name: Upload final results
         uses: actions/upload-artifact@v4
         with:
