@@ -80,14 +80,21 @@ jobs:
           fi
           echo "Proxy file decrypted successfully"
 
-      # --- NEW CACHE CLEARING STEP ---
-      # This command finds and deletes all __pycache__ directories, which contain
-      # the pre-compiled python files that are likely causing the issue.
       - name: Clear Python Cache
         run: |
           echo "Clearing all __pycache__ directories..."
           find . -type d -name "__pycache__" -exec rm -r {} +
           echo "Cache cleared."
+
+      # --- NEW FINAL DEBUGGING STEP ---
+      # This step modifies the python script in-place on the runner to add a print statement.
+      # This will give us definitive proof of the variable's value at runtime.
+      - name: Inject Debug Print into Scraper
+        run: |
+          echo "Injecting debug print statement into aa_hotels_scraper.py"
+          sed -i "/proxies.append(Proxy(/i \                        print(f'LIVE DEBUG: host=\\\"{host}\\\", port=\\\"{port}\\\", final_server=\\\"{f\\\"http://{host}:{port}\\\"}\\\"')" aa_hotels_scraper.py
+          echo "Injection complete. Displaying modified section:"
+          grep -C 5 "LIVE DEBUG" aa_hotels_scraper.py
 
       - name: Run scraper for batch
         id: run-scraper
@@ -98,26 +105,11 @@ jobs:
           BATCH_START=$((BATCH_NUM * BATCH_SIZE))
           echo "Running scraper for batch $BATCH_NUM (starts at city index $BATCH_START)..."
           
-          if python aa_hotels_scraper.py \
+          python aa_hotels_scraper.py \
             --proxies formatted_proxies.txt \
             --cities cities_top200.txt \
             --batch-start ${BATCH_START} \
-            --batch-size ${BATCH_SIZE}; then
-            echo "Scraper completed successfully"
-            echo "status=success" >> $GITHUB_OUTPUT
-            
-            if [ -f cheapest_10k_hotels_by_city.csv ]; then
-              mv cheapest_10k_hotels_by_city.csv hotels_batch_${BATCH_NUM}.csv
-              echo "Renamed output file to hotels_batch_${BATCH_NUM}.csv"
-            fi
-          else
-            SCRAPER_EXIT=$?
-            echo "Scraper failed with exit code $SCRAPER_EXIT"
-            echo "status=failed" >> $GITHUB_OUTPUT
-            
-            echo "City,Hotel,Price,Cost per Point,ProxyUsed,error_message" > hotels_batch_${BATCH_NUM}.csv
-            echo "batch_${BATCH_NUM},,,,,Scraper script failed with exit code ${SCRAPER_EXIT}" >> hotels_batch_${BATCH_NUM}.csv
-          fi
+            --batch-size ${BATCH_SIZE}
 
       - name: Upload batch results
         uses: actions/upload-artifact@v4
