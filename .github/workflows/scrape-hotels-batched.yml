@@ -1,59 +1,172 @@
-import os
-import glob
-import pandas as pd
+name: Scrape Hotels Batched
 
-def combine_batch_results():
-    """
-    Finds all batch result CSVs, combines them into a single DataFrame,
-    and saves the output. Handles cases where no files are found.
-    """
-    # This is the directory where the 'download-artifact' action places the files.
-    search_path = "batch-results"
-    
-    # The pattern finds all CSV files inside the subdirectories created by the download action.
-    csv_pattern = os.path.join(search_path, "*", "hotels_batch_*.csv")
-    csv_files = glob.glob(csv_pattern)
-    
-    if not csv_files:
-        print("No batch result CSVs found to combine. Creating an empty results file.")
-        # Create an empty DataFrame with the expected columns to prevent errors.
-        empty_df = pd.DataFrame(columns=['City', 'Hotel', 'Price', 'Points', 'Check-in', 'Check-out', 'Cost per Point', 'ProxyUsed', 'error_message'])
-        empty_df.to_csv('hotels_all_results.csv', index=False)
-        return
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'Number of cities per batch'
+        required: false
+        default: '10'
+        type: string
 
-    print(f"Found {len(csv_files)} batch files to combine.")
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      total_batches: ${{ steps.set-matrix.outputs.total_batches }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    all_dfs = []
-    for f in sorted(csv_files):
-        try:
-            # Read each CSV, ignoring empty or problematic files.
-            df = pd.read_csv(f)
-            if not df.empty:
-                all_dfs.append(df)
-            else:
-                print(f"Skipping empty file: {f}")
-        except Exception as e:
-            print(f"Error reading {f}, skipping. Reason: {e}")
+      - name: Set up batches
+        id: set-matrix
+        run: |
+          BATCH_SIZE=${{ github.event.inputs.batch_size || '10' }}
+          TOTAL_CITIES=$(wc -l < cities_top200.txt)
+          echo "Total cities: $TOTAL_CITIES"
+          TOTAL_BATCHES=$(( (TOTAL_CITIES + BATCH_SIZE - 1) / BATCH_SIZE ))
+          echo "Total batches: $TOTAL_BATCHES"
+          MATRIX_JSON="{\"batch\":["
+          for i in $(seq 0 $((TOTAL_BATCHES - 1))); do
+            if [ $i -gt 0 ]; then
+              MATRIX_JSON="${MATRIX_JSON},"
+            fi
+            MATRIX_JSON="${MATRIX_JSON}${i}"
+          done
+          MATRIX_JSON="${MATRIX_JSON}]}"
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "total_batches=$TOTAL_BATCHES" >> $GITHUB_OUTPUT
+          echo "Matrix: $MATRIX_JSON"
 
-    if not all_dfs:
-        print("All found CSV files were empty or invalid. Creating an empty results file.")
-        empty_df = pd.DataFrame(columns=['City', 'Hotel', 'Price', 'Points', 'Check-in', 'Check-out', 'Cost per Point', 'ProxyUsed', 'error_message'])
-        empty_df.to_csv('hotels_all_results.csv', index=False)
-        return
+  scrape:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      max-parallel: 5
+      fail-fast: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    # Concatenate all DataFrames into one.
-    combined_df = pd.concat(all_dfs, ignore_index=True)
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-    # Sort results for consistency.
-    if 'City' in combined_df.columns:
-        combined_df = combined_df.sort_values(by='City').reset_index(drop=True)
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas==2.0.3 numpy==1.24.3 playwright more_itertools aiohttp
+          fi
+          if pip show playwright > /dev/null 2>&1; then
+            echo "Installing Playwright browsers..."
+            playwright install chromium
+          fi
 
-    # Save the final combined file.
-    output_filename = 'hotels_all_results.csv'
-    combined_df.to_csv(output_filename, index=False)
-    
-    print(f"\n✅ Successfully combined {len(all_dfs)} files into {output_filename}.")
-    print(f"Total rows in final file: {len(combined_df)}")
+      - name: Decrypt proxy file
+        env:
+          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+        run: |
+          echo "Decrypting proxy file..."
+          openssl enc -d -aes-256-cbc -pbkdf2 -in formatted_proxies.txt.enc -out formatted_proxies.txt -k "$PROXY_PASSWORD"
+          if [ ! -f formatted_proxies.txt ] || [ ! -s formatted_proxies.txt ]; then
+            echo "Error: Proxy file decryption failed or file is empty!"
+            exit 1
+          fi
+          echo "Proxy file decrypted successfully"
 
-if __name__ == "__main__":
-    combine_batch_results()
+      - name: Run scraper for batch
+        id: run-scraper
+        continue-on-error: true
+        run: |
+          BATCH_NUM=${{ matrix.batch }}
+          BATCH_SIZE=${{ github.event.inputs.batch_size || '10' }}
+          BATCH_START=$((BATCH_NUM * BATCH_SIZE))
+          echo "Running scraper for batch $BATCH_NUM (starts at city index $BATCH_START)..."
+          
+          if python aa_hotels_scraper.py \
+            --proxies formatted_proxies.txt \
+            --cities cities_top200.txt \
+            --batch-start ${BATCH_START} \
+            --batch-size ${BATCH_SIZE}; then
+            echo "Scraper completed successfully"
+            echo "status=success" >> $GITHUB_OUTPUT
+            
+            if [ -f cheapest_10k_hotels_by_city.csv ]; then
+              mv cheapest_10k_hotels_by_city.csv hotels_batch_${BATCH_NUM}.csv
+              echo "Renamed output file to hotels_batch_${BATCH_NUM}.csv"
+            fi
+          else
+            SCRAPER_EXIT=$?
+            echo "Scraper failed with exit code $SCRAPER_EXIT"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            
+            echo "City,Hotel,Price,Cost per Point,ProxyUsed,error_message" > hotels_batch_${BATCH_NUM}.csv
+            echo "batch_${BATCH_NUM},,,,,Scraper script failed with exit code ${SCRAPER_EXIT}" >> hotels_batch_${BATCH_NUM}.csv
+          fi
+
+      - name: Upload batch results
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-results-${{ matrix.batch }}
+          path: hotels_batch_${{ matrix.batch }}.csv
+          retention-days: 7
+
+  combine-results:
+    needs: [setup, scrape]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install pandas
+        run: pip install pandas
+
+      - name: Download all batch results
+        uses: actions/download-artifact@v4
+        with:
+          path: batch-results
+
+      - name: Combine CSV files
+        id: combine
+        run: python combine_results.py
+
+      - name: Upload combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-results
+          path: hotels_all_results.csv
+          retention-days: 30
+
+      - name: Create summary
+        run: |
+          if [ -f hotels_all_results.csv ]; then
+            {
+              echo "## Scraping Summary"
+              echo ""
+              echo "- Total batches processed: ${{ needs.setup.outputs.total_batches }}"
+              echo "- Combined results file: [hotels_all_results.csv](hotels_all_results.csv)"
+              echo "- Total rows in result: $(wc -l < hotels_all_results.csv)"
+              echo ""
+              echo "### Preview (first 10 lines):"
+              echo '```csv'
+              head -10 hotels_all_results.csv
+              echo '```'
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            {
+              echo "## Scraping Failed"
+              echo "No combined results file was created. This may be because all scraping batches failed."
+            } >> $GITHUB_STEP_SUMMARY
+          fi
