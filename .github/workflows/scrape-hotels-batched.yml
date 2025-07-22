@@ -80,13 +80,14 @@ jobs:
           fi
           echo "Proxy file decrypted successfully"
 
-      # --- NEW DEBUGGING STEP ---
-      # This will print the top of the scraper file to the log.
-      - name: Verify Scraper Code Content
+      # --- NEW CACHE CLEARING STEP ---
+      # This command finds and deletes all __pycache__ directories, which contain
+      # the pre-compiled python files that are likely causing the issue.
+      - name: Clear Python Cache
         run: |
-          echo "--- Displaying top of aa_hotels_scraper.py ---"
-          head -n 90 aa_hotels_scraper.py
-          echo "----------------------------------------------"
+          echo "Clearing all __pycache__ directories..."
+          find . -type d -name "__pycache__" -exec rm -r {} +
+          echo "Cache cleared."
 
       - name: Run scraper for batch
         id: run-scraper
