@@ -52,32 +52,39 @@ class ProxyManager:
         self.lock = asyncio.Lock()
         
     def _load_proxies(self, proxy_file: str) -> List[Proxy]:
-        """Load proxies from file, handling existing http prefixes."""
+        """Load proxies from file, robustly handling different formats."""
         proxies = []
+        logging.info(f"Attempting to load proxies from {proxy_file}...")
         try:
             with open(proxy_file, 'r') as f:
-                for line in f:
+                for i, line in enumerate(f):
                     line = line.strip()
-                    if line and line.count(":") == 3:
-                        host, port, user, pwd = line.split(":")
-                        
-                        # --- THIS IS THE FIX ---
-                        # Strip any existing http:// or https:// prefix from the host.
-                        # This prevents creating an invalid URL like "http://http://...".
-                        if host.startswith("http://"):
-                            host = host[7:]
-                        elif host.startswith("https://"):
-                            host = host[8:]
-                        # --- END OF FIX ---
+                    if not line:
+                        continue
 
+                    # Clean the line by removing any protocol prefixes
+                    cleaned_line = line.replace("http://", "").replace("https://", "")
+
+                    parts = cleaned_line.split(':')
+                    
+                    # We expect 4 parts: host, port, user, pass
+                    if len(parts) == 4:
+                        host, port, user, pwd = parts
                         proxies.append(Proxy(
-                            server=f"http://{host}:{port}", # This will now be correct.
+                            server=f"http://{host}:{port}",
                             username=user,
                             password=pwd
                         ))
-            logging.info(f"Loaded {len(proxies)} proxies from {proxy_file}")
+                    else:
+                        logging.warning(f"Skipping malformed proxy line #{i+1}. Expected 4 parts (host:port:user:pass), found {len(parts)}. Line: '{line}'")
+            
+            logging.info(f"Successfully loaded {len(proxies)} valid proxies.")
         except FileNotFoundError:
             logging.error(f"Proxy file not found: {proxy_file}")
+        
+        if not proxies:
+            logging.error("No valid proxies could be loaded from the file. Please check the file format.")
+
         return proxies
     
     async def test_proxy(self, proxy: Proxy) -> bool:
@@ -100,14 +107,13 @@ class ProxyManager:
                         logging.warning(f"Proxy {proxy.server} test failed with status: {response.status}")
                         return False
         except Exception as e:
-            logging.warning(f"Proxy {proxy.server} test failed: {type(e).__name__} - {e}")
+            logging.warning(f"Proxy {proxy.server} test failed: {type(e).__name__}")
             return False
     
     async def initialize(self, sample_size: int = 100):
         """Test a sample of proxies to find working ones"""
         if not self.proxies:
-            logging.error("Proxy list is empty. Cannot initialize.")
-            raise Exception("Proxy list is empty.")
+            raise Exception("Proxy list is empty or contains no valid proxies.")
 
         logging.info(f"Testing a random sample of {min(sample_size, len(self.proxies))} proxies...")
         sample = random.sample(self.proxies, min(sample_size, len(self.proxies)))
@@ -122,8 +128,7 @@ class ProxyManager:
         logging.info(f"Found {len(self.working_proxies)} working proxies out of {len(sample)} tested.")
         
         if not self.working_proxies:
-            logging.error("Could not find any working proxies from the tested sample.")
-            raise Exception("No working proxies found!")
+            raise Exception("No working proxies found from the tested sample!")
     
     async def get_proxy(self) -> Optional[Proxy]:
         """Get next working proxy"""
@@ -297,7 +302,7 @@ async def scrape_city_date(
                 return cheapest_10k
                 
         except Exception as e:
-            logging.warning(f"Attempt {attempt + 1} for {city} on {checkin.date()} failed: {type(e).__name__} - {e}")
+            logging.warning(f"Attempt {attempt + 1} for {city} on {checkin.date()} failed: {type(e).__name__}")
             if use_proxy and proxy:
                 await proxy_manager.mark_proxy_failed(proxy)
             
@@ -356,9 +361,13 @@ class ResultsManager:
     def _load_existing(self):
         """Load existing results if file exists"""
         if os.path.exists(self.results_file):
-            df = pd.read_csv(self.results_file)
-            self.results = df.to_dict('records')
-            logging.info(f"Loaded {len(self.results)} existing results")
+            try:
+                df = pd.read_csv(self.results_file)
+                self.results = df.to_dict('records')
+                logging.info(f"Loaded {len(self.results)} existing results")
+            except pd.errors.EmptyDataError:
+                logging.warning(f"Results file {self.results_file} is empty.")
+                self.results = []
     
     async def add_result(self, result: Dict):
         """Add a result and save to file"""
