@@ -78,7 +78,6 @@ class ProxyManager:
                             ))
                             continue  # Successfully parsed, move to the next line
                         except ValueError:
-                            # This will catch errors if the splits don't work as expected
                             logging.warning(f"Skipping malformed proxy line #{i+1} (format user:pass@host:port). Line: '{line}'")
                             continue
                     
