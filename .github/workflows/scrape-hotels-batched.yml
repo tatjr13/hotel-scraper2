@@ -22,15 +22,14 @@ jobs:
       - id: set-matrix
         run: |
           TOTAL_CITIES=$(wc -l < cities_top200.txt)
-          BATCH_SIZE=${{ github.event.inputs.batch_size || '2' }}
+          BATCH_SIZE="${{ github.event.inputs.batch_size }}"
+          if [[ -z "$BATCH_SIZE" ]]; then BATCH_SIZE=2; fi
           BATCHES=()
           for ((i=0; i<$TOTAL_CITIES; i+=$BATCH_SIZE)); do
             BATCHES+=("{\"start\": $i, \"size\": $BATCH_SIZE}")
           done
           MATRIX="{\"batch\": [$(IFS=,; echo "${BATCHES[*]}")]}"
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "MATRIX: $MATRIX"
-      - run: echo "Matrix is: ${{ steps.set-matrix.outputs.matrix }}"
 
   scrape-batch:
     needs: calculate-batches
@@ -94,7 +93,8 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install pandas
+        run: |
+          pip install pandas
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -104,11 +104,25 @@ jobs:
           python - << 'EOF'
 import pandas as pd
 import glob
+import os
+
 csv_files = glob.glob('results/*/cheapest_10k_hotels_by_city.csv')
 if not csv_files:
     print("No results found!")
     exit(1)
-dfs = [pd.read_csv(f) for f in csv_files]
+
+dfs = []
+for file in csv_files:
+    try:
+        df = pd.read_csv(file)
+        dfs.append(df)
+    except Exception as e:
+        print(f"Failed to read {file}: {e}")
+
+if not dfs:
+    print("No valid CSV files found!")
+    exit(1)
+
 combined = pd.concat(dfs, ignore_index=True)
 combined = combined.drop_duplicates(subset=['City'], keep='first')
 combined = combined.sort_values('Cost per Point')
