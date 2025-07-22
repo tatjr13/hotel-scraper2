@@ -1,64 +1,34 @@
-name: Scrape Hotels Batched
+name: Scrape Hotels Debug
 
 on:
   workflow_dispatch:
     inputs:
-      batch_size:
-        description: 'Number of cities per batch'
+      test_batch_only:
+        description: 'Run only one test batch for debugging'
         required: false
-        default: '10'
-        type: string
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
-  setup:
+  debug-single-batch:
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      total_batches: ${{ steps.set-matrix.outputs.total_batches }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up batches
-        id: set-matrix
+      - name: List repository files
         run: |
-          # Read cities and create batches
-          BATCH_SIZE=${{ github.event.inputs.batch_size || '10' }}
-          
-          # Count total cities
-          TOTAL_CITIES=$(wc -l < cities_top200.txt)
-          echo "Total cities: $TOTAL_CITIES"
-          
-          # Calculate number of batches
-          TOTAL_BATCHES=$(( (TOTAL_CITIES + BATCH_SIZE - 1) / BATCH_SIZE ))
-          echo "Total batches: $TOTAL_BATCHES"
-          
-          # Create matrix JSON
-          MATRIX_JSON="{\"batch\":["
-          for i in $(seq 0 $((TOTAL_BATCHES - 1))); do
-            if [ $i -gt 0 ]; then
-              MATRIX_JSON="${MATRIX_JSON},"
-            fi
-            MATRIX_JSON="${MATRIX_JSON}${i}"
-          done
-          MATRIX_JSON="${MATRIX_JSON}]}"
-          
-          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
-          echo "total_batches=$TOTAL_BATCHES" >> $GITHUB_OUTPUT
-          
-          # Debug output
-          echo "Matrix: $MATRIX_JSON"
-
-  scrape:
-    needs: setup
-    runs-on: ubuntu-latest
-    strategy:
-      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
-      max-parallel: 5
-      fail-fast: false
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+          echo "=== Repository Contents ==="
+          ls -la
+          echo ""
+          echo "=== Python files ==="
+          find . -name "*.py" -type f
+          echo ""
+          echo "=== Text files ==="
+          find . -name "*.txt" -type f
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -68,232 +38,220 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests beautifulsoup4 lxml
-          # Add any other dependencies your scraper needs
+          
+          # Install common scraping libraries
+          pip install pandas requests beautifulsoup4 lxml selenium aiohttp
+          
+          # Check if requirements.txt exists
           if [ -f requirements.txt ]; then
+            echo "=== requirements.txt contents ==="
+            cat requirements.txt
+            echo "=== Installing from requirements.txt ==="
             pip install -r requirements.txt
+          else
+            echo "No requirements.txt found"
           fi
+          
+          echo ""
+          echo "=== Installed packages ==="
+          pip freeze
+
+      - name: Check scraper syntax
+        run: |
+          echo "=== Checking scraper file ==="
+          if [ -f aa_hotels_scraper.py ]; then
+            echo "✓ Scraper found"
+            # Check syntax
+            python -m py_compile aa_hotels_scraper.py && echo "✓ Syntax valid" || echo "✗ Syntax error!"
+            
+            # Show imports
+            echo ""
+            echo "=== Scraper imports (first 20 lines) ==="
+            head -20 aa_hotels_scraper.py
+            
+            # Look for main or argparse
+            echo ""
+            echo "=== Checking for argparse usage ==="
+            grep -n "argparse\|ArgumentParser\|parse_args" aa_hotels_scraper.py | head -10 || echo "No argparse found"
+            
+            echo ""
+            echo "=== Checking for main function ==="
+            grep -n "if __name__\|def main" aa_hotels_scraper.py | head -5 || echo "No main found"
+          else
+            echo "✗ aa_hotels_scraper.py NOT FOUND!"
+          fi
+
+      - name: Test scraper help
+        continue-on-error: true
+        run: |
+          echo "=== Testing scraper help ==="
+          python aa_hotels_scraper.py --help 2>&1 || echo "Help failed with exit code: $?"
 
       - name: Decrypt proxy file
         env:
           PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
         run: |
-          echo "Decrypting proxy file..."
-          openssl enc -d -aes-256-cbc -pbkdf2 -in formatted_proxies.txt.enc -out formatted_proxies.txt -k "$PROXY_PASSWORD"
+          echo "=== Decrypting proxy file ==="
+          if [ -f formatted_proxies.txt.enc ]; then
+            if openssl enc -d -aes-256-cbc -pbkdf2 -in formatted_proxies.txt.enc -out formatted_proxies.txt -k "$PROXY_PASSWORD"; then
+              echo "✓ Decryption successful"
+              echo "Proxy file lines: $(wc -l < formatted_proxies.txt)"
+              echo "First proxy format: $(head -1 formatted_proxies.txt | sed 's/[^:@]*:[^:@]*@[^:]*:/user:pass@host:/')"
+            else
+              echo "✗ Decryption failed!"
+            fi
+          else
+            echo "✗ formatted_proxies.txt.enc not found!"
+          fi
+
+      - name: Check cities file
+        run: |
+          echo "=== Checking cities file ==="
+          if [ -f cities_top200.txt ]; then
+            echo "✓ Cities file found"
+            echo "Total cities: $(wc -l < cities_top200.txt)"
+            echo ""
+            echo "First 10 cities:"
+            head -10 cities_top200.txt
+            echo ""
+            echo "Last 5 cities:"
+            tail -5 cities_top200.txt
+          else
+            echo "✗ cities_top200.txt not found!"
+          fi
+
+      - name: Create test batch
+        run: |
+          echo "=== Creating test batch ==="
+          # Take first 3 cities for testing
+          head -3 cities_top200.txt > test_cities.txt
+          echo "Test cities:"
+          cat test_cities.txt
+
+      - name: Run scraper with full debugging
+        run: |
+          echo "=== Running scraper with debugging ==="
           
-          # Verify decryption worked
-          if [ ! -f formatted_proxies.txt ]; then
-            echo "Error: Proxy file decryption failed!"
-            exit 1
+          # Create a wrapper script to capture all output
+          cat > run_scraper_debug.py << 'EOF'
+          import subprocess
+          import sys
+          import os
+          
+          # Set environment for debugging
+          env = os.environ.copy()
+          env['PYTHONUNBUFFERED'] = '1'
+          
+          # Command to run
+          cmd = [
+              sys.executable, 'aa_hotels_scraper.py',
+              '--proxy-file', 'formatted_proxies.txt',
+              '--city-file', 'test_cities.txt',
+              '--output', 'test_output.csv',
+              '--batch-num', '0'
+          ]
+          
+          print(f"Running command: {' '.join(cmd)}")
+          print("=" * 60)
+          
+          try:
+              # Run with full output capture
+              result = subprocess.run(
+                  cmd,
+                  capture_output=True,
+                  text=True,
+                  env=env,
+                  timeout=300  # 5 minute timeout
+              )
+              
+              print("STDOUT:")
+              print(result.stdout)
+              print("\nSTDERR:")
+              print(result.stderr)
+              print(f"\nExit code: {result.returncode}")
+              
+          except subprocess.TimeoutExpired:
+              print("ERROR: Scraper timed out after 5 minutes!")
+          except FileNotFoundError:
+              print("ERROR: Could not find Python or scraper file!")
+          except Exception as e:
+              print(f"ERROR: {type(e).__name__}: {e}")
+              import traceback
+              traceback.print_exc()
+          EOF
+          
+          python run_scraper_debug.py
+
+      - name: Check output
+        if: always()
+        run: |
+          echo "=== Checking for output files ==="
+          
+          # List all CSV files
+          echo "CSV files in directory:"
+          find . -name "*.csv" -type f -ls
+          
+          # Check test output
+          if [ -f test_output.csv ]; then
+            echo ""
+            echo "✓ test_output.csv created!"
+            echo "File size: $(wc -c < test_output.csv) bytes"
+            echo "Line count: $(wc -l < test_output.csv) lines"
+            echo ""
+            echo "Contents:"
+            cat test_output.csv
+          else
+            echo "✗ No test_output.csv created"
           fi
           
-          # Check file is not empty
-          if [ ! -s formatted_proxies.txt ]; then
-            echo "Error: Decrypted proxy file is empty!"
-            exit 1
-          fi
-          
-          echo "Proxy file decrypted successfully"
-          echo "Proxy file size: $(wc -c < formatted_proxies.txt) bytes"
+          # Check for any other output files
+          echo ""
+          echo "All files created/modified in last 5 minutes:"
+          find . -type f -mmin -5 -ls
 
-      - name: Prepare batch cities
-        id: prep-batch
+      - name: Alternative scraper test
+        if: always()
         run: |
-          BATCH_SIZE=${{ github.event.inputs.batch_size || '10' }}
-          BATCH_NUM=${{ matrix.batch }}
+          echo "=== Testing different argument formats ==="
           
-          # Calculate start and end lines
-          START_LINE=$((BATCH_NUM * BATCH_SIZE + 1))
-          END_LINE=$(((BATCH_NUM + 1) * BATCH_SIZE))
+          # Test 1: Minimal arguments
+          echo "Test 1: Minimal args"
+          timeout 30 python aa_hotels_scraper.py test_cities.txt 2>&1 || echo "Exit: $?"
           
-          # Extract cities for this batch
-          sed -n "${START_LINE},${END_LINE}p" cities_top200.txt > cities_batch_${BATCH_NUM}.txt
+          echo ""
+          echo "Test 2: Positional args"
+          timeout 30 python aa_hotels_scraper.py test_cities.txt test_output2.csv 2>&1 || echo "Exit: $?"
           
-          # Count cities in batch
-          BATCH_CITY_COUNT=$(wc -l < cities_batch_${BATCH_NUM}.txt)
-          echo "Batch $BATCH_NUM contains $BATCH_CITY_COUNT cities (lines $START_LINE-$END_LINE)"
-          
-          # Save batch info for later
-          echo "batch_num=${BATCH_NUM}" >> $GITHUB_OUTPUT
-          echo "batch_city_count=${BATCH_CITY_COUNT}" >> $GITHUB_OUTPUT
-
-      - name: Run scraper for batch
-        id: run-scraper
-        continue-on-error: true
-        run: |
-          BATCH_NUM=${{ steps.prep-batch.outputs.batch_num }}
-          
-          echo "Running scraper for batch $BATCH_NUM..."
-          
-          # Run the scraper with error handling
-          if python aa_hotels_scraper.py \
+          echo ""
+          echo "Test 3: Without batch-num"
+          timeout 30 python aa_hotels_scraper.py \
             --proxy-file formatted_proxies.txt \
-            --city-file cities_batch_${BATCH_NUM}.txt \
-            --output hotels_batch_${BATCH_NUM}.csv \
-            --batch-num ${BATCH_NUM}; then
-            echo "Scraper completed successfully"
-            echo "status=success" >> $GITHUB_OUTPUT
-          else
-            SCRAPER_EXIT=$?
-            echo "Scraper failed with exit code $SCRAPER_EXIT"
-            echo "status=failed" >> $GITHUB_OUTPUT
-            
-            # Create empty CSV with error message
-            echo "city,error_message" > hotels_batch_${BATCH_NUM}.csv
-            echo "batch_${BATCH_NUM},Scraper failed" >> hotels_batch_${BATCH_NUM}.csv
-          fi
-          
-          # Check if output file exists
-          if [ -f hotels_batch_${BATCH_NUM}.csv ]; then
-            echo "Output file created: $(wc -l < hotels_batch_${BATCH_NUM}.csv) lines"
-          else
-            echo "Warning: No output file created, creating empty one"
-            echo "city,hotel_name,price,rating" > hotels_batch_${BATCH_NUM}.csv
-            echo "batch_${BATCH_NUM},No data,0,0" >> hotels_batch_${BATCH_NUM}.csv
-          fi
+            --city-file test_cities.txt \
+            --output test_output3.csv 2>&1 || echo "Exit: $?"
 
-      - name: Upload batch results
+      - name: Upload debug artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: batch-results-${{ matrix.batch }}
-          path: hotels_batch_${{ matrix.batch }}.csv
+          name: debug-output
+          path: |
+            *.csv
+            *.log
+            test_cities.txt
           retention-days: 7
 
-  combine-results:
-    needs: [setup, scrape]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install pandas
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas
-
-      - name: Download all batch results
-        uses: actions/download-artifact@v4
-        with:
-          path: batch-results
-
-      - name: Combine CSV files
-        run: |
-          # Create a Python script to combine results
-          cat > combine_results.py << 'PYTHON_SCRIPT'
-          import os
-          import pandas as pd
-          import glob
-          from pathlib import Path
-          
-          def combine_csv_files():
-              """Combine all batch CSV files into a single result file."""
-              
-              # Find all CSV files
-              csv_pattern = "batch-results/*/hotels_batch_*.csv"
-              csv_files = glob.glob(csv_pattern)
-              
-              print(f"Found {len(csv_files)} CSV files to combine")
-              
-              if not csv_files:
-                  print("No CSV files found!")
-                  # Create empty result file
-                  empty_df = pd.DataFrame(columns=['city', 'hotel_name', 'price', 'rating', 'error'])
-                  empty_df.to_csv('hotels_all_results.csv', index=False)
-                  print("Created empty results file")
-                  return
-              
-              # Read and combine all CSV files
-              all_dfs = []
-              for csv_file in sorted(csv_files):
-                  print(f"Reading: {csv_file}")
-                  try:
-                      df = pd.read_csv(csv_file)
-                      # Add source file info
-                      df['source_batch'] = os.path.basename(csv_file)
-                      all_dfs.append(df)
-                      print(f"  - Added {len(df)} rows")
-                  except Exception as e:
-                      print(f"  - Error reading {csv_file}: {e}")
-                      continue
-              
-              if not all_dfs:
-                  print("No valid data found in any CSV files!")
-                  empty_df = pd.DataFrame(columns=['city', 'hotel_name', 'price', 'rating', 'error'])
-                  empty_df.to_csv('hotels_all_results.csv', index=False)
-                  return
-              
-              # Combine all dataframes
-              combined_df = pd.concat(all_dfs, ignore_index=True)
-              
-              # Remove duplicate entries if any
-              initial_count = len(combined_df)
-              # Assuming we want to keep unique combinations of city and hotel_name
-              if 'city' in combined_df.columns and 'hotel_name' in combined_df.columns:
-                  combined_df = combined_df.drop_duplicates(subset=['city', 'hotel_name'], keep='first')
-                  removed_count = initial_count - len(combined_df)
-                  if removed_count > 0:
-                      print(f"Removed {removed_count} duplicate entries")
-              
-              # Sort by city name if column exists
-              if 'city' in combined_df.columns:
-                  combined_df = combined_df.sort_values('city')
-              
-              # Save combined results
-              output_file = 'hotels_all_results.csv'
-              combined_df.to_csv(output_file, index=False)
-              
-              print(f"\nCombined results saved to {output_file}")
-              print(f"Total rows: {len(combined_df)}")
-              print(f"Columns: {', '.join(combined_df.columns)}")
-              
-              # Print summary statistics
-              if 'city' in combined_df.columns:
-                  print(f"\nCities processed: {combined_df['city'].nunique()}")
-              if 'hotel_name' in combined_df.columns:
-                  print(f"Total hotels: {combined_df['hotel_name'].nunique()}")
-              
-              # Show first few rows
-              print("\nFirst 5 rows of combined data:")
-              print(combined_df.head().to_string())
-          
-          if __name__ == "__main__":
-              combine_csv_files()
-          PYTHON_SCRIPT
-          
-          # Run the combine script
-          python combine_results.py
-
-      - name: Upload combined results
-        uses: actions/upload-artifact@v4
-        with:
-          name: combined-results
-          path: hotels_all_results.csv
-          retention-days: 30
-
       - name: Create summary
+        if: always()
         run: |
-          if [ -f hotels_all_results.csv ]; then
-            {
-              echo "## Scraping Summary"
-              echo ""
-              echo "- Total batches processed: ${{ needs.setup.outputs.total_batches }}"
-              echo "- Combined results file: hotels_all_results.csv"
-              echo "- Total rows in result: $(wc -l < hotels_all_results.csv)"
-              echo ""
-              echo "### Preview (first 10 lines):"
-              echo '```csv'
-              head -10 hotels_all_results.csv
-              echo '```'
-            } >> $GITHUB_STEP_SUMMARY
-          else
-            {
-              echo "## Scraping Failed"
-              echo "No combined results file was created."
-            } >> $GITHUB_STEP_SUMMARY
-          fi
+          {
+            echo "## Debug Summary"
+            echo ""
+            echo "### File Status"
+            echo "- aa_hotels_scraper.py: $([ -f aa_hotels_scraper.py ] && echo '✓' || echo '✗')"
+            echo "- cities_top200.txt: $([ -f cities_top200.txt ] && echo '✓' || echo '✗')"
+            echo "- formatted_proxies.txt: $([ -f formatted_proxies.txt ] && echo '✓' || echo '✗')"
+            echo "- test_output.csv: $([ -f test_output.csv ] && echo '✓' || echo '✗')"
+            echo ""
+            echo "### Key Findings"
+            echo "Check the job logs for detailed error messages"
+          } >> $GITHUB_STEP_SUMMARY
