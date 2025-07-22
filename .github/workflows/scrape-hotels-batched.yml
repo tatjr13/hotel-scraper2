@@ -152,7 +152,7 @@ jobs:
           fi
 
       - name: Upload batch results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: batch-results-${{ matrix.batch }}
           path: hotels_batch_${{ matrix.batch }}.csv
@@ -177,7 +177,7 @@ jobs:
           pip install pandas
 
       - name: Download all batch results
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: batch-results
 
@@ -269,7 +269,7 @@ jobs:
           python combine_results.py
 
       - name: Upload combined results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: combined-results
           path: hotels_all_results.csv
