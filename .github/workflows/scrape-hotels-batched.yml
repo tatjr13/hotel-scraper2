@@ -52,11 +52,11 @@ jobs:
         pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Decrypt proxies file
+        - name: Decrypt proxies file
       env:
         PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
       run: |
-        openssl enc -d -aes-256-cbc -in formatted_proxies.txt.enc -out formatted_proxies.txt -k "$PROXY_PASSWORD"
+        openssl enc -d -aes-256-cbc -pbkdf2 -in formatted_proxies.txt.enc -out formatted_proxies.txt -k "$PROXY_PASSWORD"
 
     - name: Run scraper for batch
       env:
