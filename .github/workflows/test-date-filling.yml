@@ -1,0 +1,180 @@
+name: Test Date Filling
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-dates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install deps
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps
+      
+      - name: Save test script
+        run: |
+          cat > test_date_filling.py << 'EOF'
+          import asyncio
+          from playwright.async_api import async_playwright
+          from datetime import datetime, timedelta
+
+          async def test_date_filling():
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch(headless=True)
+                  page = await browser.new_page()
+                  
+                  print("Loading AA Hotels...")
+                  await page.goto("https://www.aadvantagehotels.com/")
+                  await asyncio.sleep(3)
+                  
+                  # Fill city first
+                  print("Filling city...")
+                  city_input = await page.wait_for_selector('input[placeholder="Enter a city, airport, or landmark"]')
+                  await city_input.click()
+                  await city_input.fill("Bangkok")
+                  await asyncio.sleep(2)
+                  
+                  # Select from dropdown
+                  dropdown = await page.query_selector_all('ul[role="listbox"] li')
+                  if dropdown:
+                      await dropdown[0].click()
+                      print("Selected Bangkok from dropdown")
+                  
+                  await asyncio.sleep(1)
+                  
+                  # Now try different methods to fill dates
+                  tomorrow = datetime.now() + timedelta(days=1)
+                  day_after = tomorrow + timedelta(days=1)
+                  checkin_str = tomorrow.strftime("%m/%d/%Y")
+                  checkout_str = day_after.strftime("%m/%d/%Y")
+                  
+                  print(f"Trying to set dates: {checkin_str} to {checkout_str}")
+                  
+                  # Method 1: Click and type
+                  print("\nMethod 1: Click and type...")
+                  try:
+                      checkin = await page.query_selector('input[placeholder="Check-in"]')
+                      await checkin.click()
+                      await asyncio.sleep(1)
+                      
+                      # Try typing
+                      await page.keyboard.type(checkin_str)
+                      await asyncio.sleep(1)
+                      
+                      # Check value
+                      value1 = await checkin.get_attribute('value')
+                      print(f"Check-in value after typing: '{value1}'")
+                      
+                      # Take screenshot
+                      await page.screenshot(path="1_after_type.png")
+                  except Exception as e:
+                      print(f"Method 1 error: {e}")
+                  
+                  # Method 2: Fill
+                  print("\nMethod 2: Fill...")
+                  try:
+                      await checkin.fill(checkin_str)
+                      await asyncio.sleep(1)
+                      
+                      value2 = await checkin.get_attribute('value')
+                      print(f"Check-in value after fill: '{value2}'")
+                      
+                      await page.screenshot(path="2_after_fill.png")
+                  except Exception as e:
+                      print(f"Method 2 error: {e}")
+                  
+                  # Method 3: JavaScript
+                  print("\nMethod 3: JavaScript...")
+                  try:
+                      await page.evaluate(f'''
+                          const input = document.querySelector('input[placeholder="Check-in"]');
+                          if (input) {{
+                              input.value = "{checkin_str}";
+                              input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                              input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                          }}
+                      ''')
+                      await asyncio.sleep(1)
+                      
+                      value3 = await checkin.get_attribute('value')
+                      print(f"Check-in value after JS: '{value3}'")
+                      
+                      await page.screenshot(path="3_after_js.png")
+                  except Exception as e:
+                      print(f"Method 3 error: {e}")
+                  
+                  # Method 4: Look for date picker
+                  print("\nMethod 4: Looking for date picker...")
+                  try:
+                      # Click to open date picker
+                      await checkin.click()
+                      await asyncio.sleep(1)
+                      
+                      # Look for calendar
+                      calendar = await page.query_selector('[role="application"][aria-label*="calendar"]')
+                      if calendar:
+                          print("Found calendar!")
+                          
+                          # Try to find tomorrow's date
+                          day_num = str(tomorrow.day)
+                          date_buttons = await page.query_selector_all('button[role="gridcell"]')
+                          
+                          for btn in date_buttons:
+                              text = await btn.text_content()
+                              if text.strip() == day_num:
+                                  await btn.click()
+                                  print(f"Clicked date {day_num}")
+                                  break
+                          
+                          await asyncio.sleep(1)
+                          
+                      value4 = await checkin.get_attribute('value')
+                      print(f"Check-in value after date picker: '{value4}'")
+                      
+                      await page.screenshot(path="4_after_picker.png")
+                  except Exception as e:
+                      print(f"Method 4 error: {e}")
+                  
+                  # Final check
+                  print("\nFinal values:")
+                  checkin_final = await page.query_selector('input[placeholder="Check-in"]')
+                  checkout_final = await page.query_selector('input[placeholder="Check-out"]')
+                  
+                  checkin_val = await checkin_final.get_attribute('value')
+                  checkout_val = await checkout_final.get_attribute('value')
+                  
+                  print(f"Check-in: '{checkin_val}'")
+                  print(f"Check-out: '{checkout_val}'")
+                  
+                  await page.screenshot(path="5_final_state.png", full_page=True)
+                  
+                  # Save HTML
+                  html = await page.content()
+                  with open("debug_date_issue.html", "w") as f:
+                      f.write(html)
+                  
+                  await browser.close()
+
+          if __name__ == "__main__":
+              asyncio.run(test_date_filling())
+          EOF
+      
+      - name: Run date test
+        run: python test_date_filling.py
+      
+      - name: Upload debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: date-debug-files
+          path: |
+            *.png
+            *.html
