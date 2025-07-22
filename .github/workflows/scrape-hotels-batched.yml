@@ -278,17 +278,21 @@ PYTHON_SCRIPT
       - name: Create summary
         run: |
           if [ -f hotels_all_results.csv ]; then
-            echo "## Scraping Summary" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "- Total batches processed: ${{ needs.setup.outputs.total_batches }}" >> $GITHUB_STEP_SUMMARY
-            echo "- Combined results file: hotels_all_results.csv" >> $GITHUB_STEP_SUMMARY
-            echo "- Total rows in result: $(wc -l < hotels_all_results.csv)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Preview (first 10 lines):" >> $GITHUB_STEP_SUMMARY
-            echo '```csv' >> $GITHUB_STEP_SUMMARY
-            head -10 hotels_all_results.csv >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
+            {
+              echo "## Scraping Summary"
+              echo ""
+              echo "- Total batches processed: ${{ needs.setup.outputs.total_batches }}"
+              echo "- Combined results file: hotels_all_results.csv"
+              echo "- Total rows in result: $(wc -l < hotels_all_results.csv)"
+              echo ""
+              echo "### Preview (first 10 lines):"
+              echo '```csv'
+              head -10 hotels_all_results.csv
+              echo '```'
+            } >> $GITHUB_STEP_SUMMARY
           else
-            echo "## Scraping Failed" >> $GITHUB_STEP_SUMMARY
-            echo "No combined results file was created." >> $GITHUB_STEP_SUMMARY
+            {
+              echo "## Scraping Failed"
+              echo "No combined results file was created."
+            } >> $GITHUB_STEP_SUMMARY
           fi
