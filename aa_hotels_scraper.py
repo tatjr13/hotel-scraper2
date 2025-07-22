@@ -261,85 +261,133 @@ async def scrape_city_date(
                 await page.goto("https://www.aadvantagehotels.com/", timeout=PAGE_TIMEOUT)
                 await asyncio.sleep(random.uniform(2, 4))
                 
+                # Fill in the city
                 city_input = await page.wait_for_selector('input[placeholder="Enter a city, airport, or landmark"]', timeout=15000)
                 await city_input.click()
                 await asyncio.sleep(1)
                 await city_input.fill(city)
                 await asyncio.sleep(2)
                 
+                # Select from dropdown
                 dropdown_options = await page.query_selector_all('ul[role="listbox"] li')
                 if dropdown_options:
                     await dropdown_options[0].click()
+                    logging.info(f"Selected {city} from dropdown")
                 else:
                     await page.keyboard.press('ArrowDown')
                     await page.keyboard.press('Enter')
                 await asyncio.sleep(1)
                 
+                # Handle dates properly
                 checkin_str = checkin.strftime("%m/%d/%Y")
                 checkout_str = checkout.strftime("%m/%d/%Y")
                 
-                await page.evaluate(f'document.querySelector(\'input[placeholder="Check-in"]\').value = "{checkin_str}"')
-                await page.evaluate(f'document.querySelector(\'input[placeholder="Check-out"]\').value = "{checkout_str}"')
+                # Click check-in field to open calendar
+                checkin_input = await page.wait_for_selector('input[placeholder="Check-in"]')
+                await checkin_input.click()
                 await asyncio.sleep(1)
                 
-                # Click search and wait for either navigation OR content change
-                await page.get_by_role("button", name="Search").click()
-                
-                # Instead of waiting for navigation, wait for results to appear
+                # Try to click the date in the calendar
+                checkin_day = str(checkin.day)
                 try:
-                    # Click and wait for either navigation or hotel results
-                    
-                    # Wait for EITHER URL change OR hotel cards to appear
-                    await page.wait_for_function(
-                        """() => {
-                            // Check if URL contains search
-                            if (window.location.href.includes('search')) return true;
-                            // Check if hotel cards are present
-                            if (document.querySelector('[data-testid="hotel-name"]')) return true;
-                            if (document.querySelector('[data-testid^="hotel-card-"]')) return true;
-                            // Check for any results container
-                            if (document.querySelector('.hotel-results')) return true;
-                            if (document.querySelector('#results')) return true;
-                            return false;
-                        }""",
-                        timeout=45000
-                    )
-                    
-                    logging.info(f"Search completed for {city}")
-                    await asyncio.sleep(3)  # Let results fully load
-                    
-                except Exception as e:
-                    logging.warning(f"Search might have failed: {e}")
-                    # Continue anyway in case results loaded
+                    # Look for the date button in the current month
+                    date_cells = await page.query_selector_all('td[role="gridcell"] button')
+                    for cell in date_cells:
+                        text = await cell.text_content()
+                        if text.strip() == checkin_day:
+                            await cell.click()
+                            logging.info(f"Clicked check-in date {checkin_day}")
+                            break
+                except:
+                    # Fallback: type the date
+                    await checkin_input.fill(checkin_str)
                 
-                # Check current URL
+                await asyncio.sleep(1)
+                
+                # The calendar might auto-advance to checkout, or we need to click it
+                checkout_input = await page.query_selector('input[placeholder="Check-out"]')
+                if checkout_input:
+                    # Check if checkout needs to be set
+                    current_checkout = await checkout_input.get_attribute('value')
+                    if not current_checkout or current_checkout != checkout_str:
+                        await checkout_input.click()
+                        await asyncio.sleep(1)
+                        
+                        # Try to click checkout date in calendar
+                        checkout_day = str(checkout.day)
+                        try:
+                            date_cells = await page.query_selector_all('td[role="gridcell"] button')
+                            for cell in date_cells:
+                                text = await cell.text_content()
+                                if text.strip() == checkout_day:
+                                    await cell.click()
+                                    logging.info(f"Clicked check-out date {checkout_day}")
+                                    break
+                        except:
+                            await checkout_input.fill(checkout_str)
+                
+                await asyncio.sleep(1)
+                
+                # Close calendar by clicking outside
+                await page.click('h1', force=True)
+                await asyncio.sleep(0.5)
+                
+                # Verify all fields are filled before searching
+                city_value = await city_input.get_attribute('value')
+                checkin_value = await checkin_input.get_attribute('value')
+                checkout_value = await checkout_input.get_attribute('value')
+                
+                logging.info(f"Form values - City: {city_value}, Check-in: {checkin_value}, Check-out: {checkout_value}")
+                
+                # Click search button
+                search_button = await page.wait_for_selector('button:has-text("Search")', state='visible')
+                await search_button.click()
+                logging.info("Clicked search button")
+                
+                # Wait for navigation or results
+                try:
+                    # Wait for URL change
+                    await page.wait_for_url("**/search**", timeout=30000)
+                    logging.info("Navigated to search results")
+                except:
+                    # If URL doesn't change, wait for content
+                    try:
+                        await page.wait_for_selector('[data-testid*="hotel"]', timeout=20000)
+                        logging.info("Found hotel results")
+                    except:
+                        logging.warning("No navigation or results found")
+                
+                await asyncio.sleep(3)
+                
                 current_url = page.url
-                logging.debug(f"Current URL: {current_url}")
+                logging.info(f"Current URL: {current_url}")
                 
-                # Try to sort by miles if we're on a search page
-                if "search" in current_url or "results" in current_url:
-                    if "sort=" not in current_url:
-                        sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
-                    else:
-                        sorted_url = re.sub(r'sort=[^&]*', 'sort=milesHighest', current_url)
-                    
+                # Try to sort by miles if possible
+                if "sort=" not in current_url and ("search" in current_url or "results" in current_url):
+                    sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
                     try:
                         await page.goto(sorted_url, timeout=PAGE_TIMEOUT)
                         await asyncio.sleep(2)
+                        logging.info("Applied sort by miles")
                     except:
-                        logging.debug("Could not navigate to sorted URL")
+                        pass
                 
-                # Look for hotel cards with multiple possible selectors
+                # Look for hotel cards
+                hotel_elements = []
                 hotel_selectors = [
                     'div[data-testid^="hotel-card-"]',
                     '[data-testid="hotel-card"]',
-                    '.hotel-card',
-                    '.property-card',
+                    '[data-testid*="property-card"]',
+                    'div[class*="HotelCard"]',
+                    'div[class*="PropertyCard"]',
+                    'div[class*="hotelcard"]',
+                    'div[class*="hotel-result"]',
                     'article[class*="hotel"]',
-                    'div[class*="property"]'
+                    '.hotel-item',
+                    '.property-item',
+                    '[role="article"]'
                 ]
                 
-                hotel_elements = []
                 for selector in hotel_selectors:
                     hotel_elements = await page.query_selector_all(selector)
                     if hotel_elements:
@@ -348,27 +396,69 @@ async def scrape_city_date(
                 
                 if not hotel_elements:
                     logging.warning(f"No hotel cards found for {city}")
-                    # Take a screenshot for debugging
-                    await page.screenshot(path=f"no_hotels_{city.replace(',', '').replace(' ', '_')}.png")
-                    return None
+                    await page.screenshot(path=f"no_hotels_{city.replace(',', '').replace(' ', '_')}_{attempt}.png", full_page=True)
+                    
+                    # Save HTML for debugging
+                    html = await page.content()
+                    with open(f"debug_{city.replace(',', '').replace(' ', '_')}_{attempt}.html", 'w', encoding='utf-8') as f:
+                        f.write(html)
+                    
+                    continue  # Try next attempt
                 
                 cheapest_10k = None
                 
+                # Parse hotel cards
                 for card in hotel_elements[:20]:
                     try:
-                        # Try multiple selectors for hotel details
-                        name_elem = await card.query_selector('[data-testid="hotel-name"]') or \
-                                   await card.query_selector('.hotel-name') or \
-                                   await card.query_selector('h3') or \
-                                   await card.query_selector('[class*="property-name"]')
+                        # Look for hotel name
+                        name_elem = None
+                        name_selectors = [
+                            '[data-testid="hotel-name"]',
+                            '[data-testid="property-name"]',
+                            '.hotel-name',
+                            '.property-name',
+                            'h2',
+                            'h3',
+                            '[class*="hotel-name"]',
+                            '[class*="property-name"]'
+                        ]
                         
-                        price_elem = await card.query_selector('[data-testid="earn-price"]') or \
-                                    await card.query_selector('[class*="price"]') or \
-                                    await card.query_selector('[data-testid="price"]')
+                        for sel in name_selectors:
+                            name_elem = await card.query_selector(sel)
+                            if name_elem:
+                                break
                         
-                        miles_elem = await card.query_selector('[data-testid="tier-earn-rewards"]') or \
-                                    await card.query_selector('[class*="miles"]') or \
-                                    await card.query_selector('[class*="points"]')
+                        # Look for price
+                        price_elem = None
+                        price_selectors = [
+                            '[data-testid="earn-price"]',
+                            '[data-testid="price"]',
+                            '[class*="price"]',
+                            '[class*="rate"]',
+                            'span:has-text("$")'
+                        ]
+                        
+                        for sel in price_selectors:
+                            price_elem = await card.query_selector(sel)
+                            if price_elem:
+                                break
+                        
+                        # Look for miles/points
+                        miles_elem = None
+                        miles_selectors = [
+                            '[data-testid="tier-earn-rewards"]',
+                            '[data-testid="points"]',
+                            '[data-testid="miles"]',
+                            '[class*="miles"]',
+                            '[class*="points"]',
+                            'span:has-text("miles")',
+                            'span:has-text("points")'
+                        ]
+                        
+                        for sel in miles_selectors:
+                            miles_elem = await card.query_selector(sel)
+                            if miles_elem:
+                                break
 
                         if not (name_elem and price_elem and miles_elem):
                             continue
@@ -377,9 +467,11 @@ async def scrape_city_date(
                         price_text = await price_elem.text_content()
                         miles_text = await miles_elem.text_content()
                         
+                        # Extract price
                         price_match = re.search(r'([\d,]+\.?\d*)', price_text)
                         price = float(price_match.group(1).replace(',', '')) if price_match else None
                         
+                        # Extract points
                         miles_numbers = re.findall(r'([\d,]+)', miles_text)
                         points = max([int(n.replace(',', '')) for n in miles_numbers if n] or [0])
 
@@ -395,13 +487,17 @@ async def scrape_city_date(
                             }
                             if not cheapest_10k or price < cheapest_10k['Price']:
                                 cheapest_10k = hotel_data
+                                logging.info(f"Found 10K hotel: {name.strip()} at ${price}")
                                 
                     except Exception as e:
                         logging.debug(f"Error parsing hotel card: {e}")
                         continue
                 
-                return cheapest_10k
-                
+                if cheapest_10k:
+                    return cheapest_10k
+                else:
+                    logging.info(f"No 10K hotels found in results for {city}")
+                    
         except Exception as e:
             logging.warning(f"Attempt {attempt + 1} for {city} on {checkin.date()} failed: {type(e).__name__}: {str(e)}")
             if use_proxy and proxy:
