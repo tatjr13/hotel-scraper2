@@ -290,7 +290,7 @@ async def scrape_city_date(
                 await asyncio.sleep(0.5)
                 
                 # Clear and type check-in date
-                await checkin_input.click({'clickCount': 3})  # Triple click to select all
+                await page.keyboard.press('Control+A')  # Select all
                 await checkin_input.type(checkin_str)
                 await asyncio.sleep(0.5)
                 
@@ -300,7 +300,7 @@ async def scrape_city_date(
                 
                 # Set check-out date
                 checkout_input = await page.wait_for_selector('input[placeholder="Check-out"]')
-                await checkout_input.click({'clickCount': 3})  # Triple click to select all
+                await page.keyboard.press('Control+A')  # Select all
                 await checkout_input.type(checkout_str)
                 await asyncio.sleep(0.5)
                 
@@ -319,7 +319,7 @@ async def scrape_city_date(
                 if checkin_value == checkout_value:
                     logging.warning("Dates are the same, retrying checkout...")
                     await checkout_input.click()
-                    await checkout_input.click({'clickCount': 3})
+                    await page.keyboard.press('Control+A')
                     await checkout_input.type(checkout_str)
                     await page.keyboard.press('Enter')
                     await asyncio.sleep(1)
