@@ -83,24 +83,26 @@ jobs:
           path: |
             cheapest_10k_hotels_by_city.csv
 
-  combine-results:
-    needs: scrape-batch
+    calculate-batches:
     runs-on: ubuntu-latest
-    if: always()
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install pandas
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: results
-      - name: Combine results
+      - id: set-matrix
         run: |
+          TOTAL_CITIES=$(wc -l < cities_top200.txt)
+          BATCH_SIZE=${{ github.event.inputs.batch_size || '2' }}
+          BATCHES=()
+          for ((i=0; i<$TOTAL_CITIES; i+=$BATCH_SIZE)); do
+            BATCHES+=("{\"start\": $i, \"size\": $BATCH_SIZE}")
+          done
+          MATRIX="{\"batch\": [$(IFS=,; echo "${BATCHES[*]}")]}"
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "MATRIX: $MATRIX"
+      - name: Debug matrix output
+        run: echo "Matrix is: ${{ steps.set-matrix.outputs.matrix }}"
+
           python - << 'EOF'
 import pandas as pd
 import glob
