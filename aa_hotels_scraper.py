@@ -278,66 +278,51 @@ async def scrape_city_date(
                     await page.keyboard.press('Enter')
                 await asyncio.sleep(1)
                 
-                # Handle dates properly
+                # Handle dates properly - THIS IS THE CRITICAL PART
                 checkin_str = checkin.strftime("%m/%d/%Y")
                 checkout_str = checkout.strftime("%m/%d/%Y")
                 
-                # Click check-in field to open calendar
+                logging.info(f"Setting dates: Check-in: {checkin_str}, Check-out: {checkout_str}")
+                
+                # Set check-in date
                 checkin_input = await page.wait_for_selector('input[placeholder="Check-in"]')
                 await checkin_input.click()
-                await asyncio.sleep(1)
-                
-                # Try to click the date in the calendar
-                checkin_day = str(checkin.day)
-                try:
-                    # Look for the date button in the current month
-                    date_cells = await page.query_selector_all('td[role="gridcell"] button')
-                    for cell in date_cells:
-                        text = await cell.text_content()
-                        if text.strip() == checkin_day:
-                            await cell.click()
-                            logging.info(f"Clicked check-in date {checkin_day}")
-                            break
-                except:
-                    # Fallback: type the date
-                    await checkin_input.fill(checkin_str)
-                
-                await asyncio.sleep(1)
-                
-                # The calendar might auto-advance to checkout, or we need to click it
-                checkout_input = await page.query_selector('input[placeholder="Check-out"]')
-                if checkout_input:
-                    # Check if checkout needs to be set
-                    current_checkout = await checkout_input.get_attribute('value')
-                    if not current_checkout or current_checkout != checkout_str:
-                        await checkout_input.click()
-                        await asyncio.sleep(1)
-                        
-                        # Try to click checkout date in calendar
-                        checkout_day = str(checkout.day)
-                        try:
-                            date_cells = await page.query_selector_all('td[role="gridcell"] button')
-                            for cell in date_cells:
-                                text = await cell.text_content()
-                                if text.strip() == checkout_day:
-                                    await cell.click()
-                                    logging.info(f"Clicked check-out date {checkout_day}")
-                                    break
-                        except:
-                            await checkout_input.fill(checkout_str)
-                
-                await asyncio.sleep(1)
-                
-                # Close calendar by clicking outside
-                await page.click('h1', force=True)
                 await asyncio.sleep(0.5)
                 
-                # Verify all fields are filled before searching
+                # Clear and type check-in date
+                await checkin_input.click({'clickCount': 3})  # Triple click to select all
+                await checkin_input.type(checkin_str)
+                await asyncio.sleep(0.5)
+                
+                # Move to check-out field
+                await page.keyboard.press('Tab')
+                await asyncio.sleep(0.5)
+                
+                # Set check-out date
+                checkout_input = await page.wait_for_selector('input[placeholder="Check-out"]')
+                await checkout_input.click({'clickCount': 3})  # Triple click to select all
+                await checkout_input.type(checkout_str)
+                await asyncio.sleep(0.5)
+                
+                # Close any calendar by pressing Escape
+                await page.keyboard.press('Escape')
+                await asyncio.sleep(0.5)
+                
+                # Verify all fields are filled
                 city_value = await city_input.get_attribute('value')
                 checkin_value = await checkin_input.get_attribute('value')
                 checkout_value = await checkout_input.get_attribute('value')
                 
                 logging.info(f"Form values - City: {city_value}, Check-in: {checkin_value}, Check-out: {checkout_value}")
+                
+                # Make sure dates are different
+                if checkin_value == checkout_value:
+                    logging.warning("Dates are the same, retrying checkout...")
+                    await checkout_input.click()
+                    await checkout_input.click({'clickCount': 3})
+                    await checkout_input.type(checkout_str)
+                    await page.keyboard.press('Enter')
+                    await asyncio.sleep(1)
                 
                 # Click search button
                 search_button = await page.wait_for_selector('button:has-text("Search")', state='visible')
@@ -345,25 +330,29 @@ async def scrape_city_date(
                 logging.info("Clicked search button")
                 
                 # Wait for navigation or results
+                old_url = page.url
                 try:
-                    # Wait for URL change
-                    await page.wait_for_url("**/search**", timeout=30000)
-                    logging.info("Navigated to search results")
+                    # Wait for URL change or results to appear
+                    await page.wait_for_function(
+                        f"""() => {{
+                            return window.location.href !== '{old_url}' || 
+                                   document.querySelector('[data-testid*="hotel"]') !== null ||
+                                   document.querySelector('.hotel-card') !== null ||
+                                   document.querySelector('.property-card') !== null;
+                        }}""",
+                        timeout=30000
+                    )
+                    logging.info("Page changed or results appeared")
                 except:
-                    # If URL doesn't change, wait for content
-                    try:
-                        await page.wait_for_selector('[data-testid*="hotel"]', timeout=20000)
-                        logging.info("Found hotel results")
-                    except:
-                        logging.warning("No navigation or results found")
+                    logging.warning("Timeout waiting for results")
                 
                 await asyncio.sleep(3)
                 
                 current_url = page.url
                 logging.info(f"Current URL: {current_url}")
                 
-                # Try to sort by miles if possible
-                if "sort=" not in current_url and ("search" in current_url or "results" in current_url):
+                # Try to sort by miles if on search page
+                if current_url != old_url and "sort=" not in current_url:
                     sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
                     try:
                         await page.goto(sorted_url, timeout=PAGE_TIMEOUT)
@@ -380,12 +369,11 @@ async def scrape_city_date(
                     '[data-testid*="property-card"]',
                     'div[class*="HotelCard"]',
                     'div[class*="PropertyCard"]',
-                    'div[class*="hotelcard"]',
-                    'div[class*="hotel-result"]',
                     'article[class*="hotel"]',
+                    'div[class*="hotel-card"]',
+                    'div[class*="property-card"]',
                     '.hotel-item',
-                    '.property-item',
-                    '[role="article"]'
+                    '.property-item'
                 ]
                 
                 for selector in hotel_selectors:
@@ -397,13 +385,7 @@ async def scrape_city_date(
                 if not hotel_elements:
                     logging.warning(f"No hotel cards found for {city}")
                     await page.screenshot(path=f"no_hotels_{city.replace(',', '').replace(' ', '_')}_{attempt}.png", full_page=True)
-                    
-                    # Save HTML for debugging
-                    html = await page.content()
-                    with open(f"debug_{city.replace(',', '').replace(' ', '_')}_{attempt}.html", 'w', encoding='utf-8') as f:
-                        f.write(html)
-                    
-                    continue  # Try next attempt
+                    continue
                 
                 cheapest_10k = None
                 
