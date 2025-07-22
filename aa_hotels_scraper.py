@@ -283,12 +283,11 @@ async def scrape_city_date(
                 await asyncio.sleep(1)
                 
                 # Click search and wait for either navigation OR content change
-                search_button = await page.get_by_role("button", name="Search")
+                await page.get_by_role("button", name="Search").click()
                 
                 # Instead of waiting for navigation, wait for results to appear
                 try:
                     # Click and wait for either navigation or hotel results
-                    await search_button.click()
                     
                     # Wait for EITHER URL change OR hotel cards to appear
                     await page.wait_for_function(
