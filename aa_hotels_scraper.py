@@ -6,7 +6,7 @@ from playwright.async_api import async_playwright
 import random
 import os
 import re
-from tabulate import tabulate  # Add this for better table display
+# No external dependencies needed for table display
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -410,9 +410,27 @@ async def main():
                 f"${r['Cost per Point']:.4f}"
             ])
         
-        # Display results in a nice table
+        # Display results in a nice table (custom implementation)
         headers = ['City', 'Hotel', 'Price', 'Check-in', 'CPP']
-        print(tabulate(table_data, headers=headers, tablefmt='grid'))
+        
+        # Calculate column widths
+        col_widths = [len(h) for h in headers]
+        for row in table_data:
+            for i, cell in enumerate(row):
+                col_widths[i] = max(col_widths[i], len(str(cell)))
+        
+        # Add some padding
+        col_widths = [w + 2 for w in col_widths]
+        
+        # Print header
+        print("+" + "+".join(["-" * w for w in col_widths]) + "+")
+        print("|" + "|".join([f" {headers[i]:<{col_widths[i]-2}} " for i in range(len(headers))]) + "|")
+        print("+" + "+".join(["-" * w for w in col_widths]) + "+")
+        
+        # Print rows
+        for row in table_data:
+            print("|" + "|".join([f" {str(row[i]):<{col_widths[i]-2}} " for i in range(len(row))]) + "|")
+        print("+" + "+".join(["-" * w for w in col_widths]) + "+")
         
         # Top 5 best deals
         print(f"\n🏆 TOP 5 BEST DEALS (Lowest Price for 10K Points):")
