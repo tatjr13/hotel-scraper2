@@ -33,13 +33,14 @@ jobs:
           TOTAL_BATCHES=$(( (TOTAL_CITIES + BATCH_SIZE - 1) / BATCH_SIZE ))
           echo "Total batches: $TOTAL_BATCHES"
           
-          # Create matrix JSON
-          MATRIX_JSON="{\"batch\":["
+          # CHANGED: Create matrix JSON with both batch number and start index
+          MATRIX_JSON="{\"include\":["
           for i in $(seq 0 $((TOTAL_BATCHES - 1))); do
             if [ $i -gt 0 ]; then
               MATRIX_JSON="${MATRIX_JSON},"
             fi
-            MATRIX_JSON="${MATRIX_JSON}${i}"
+            START_IDX=$((i * BATCH_SIZE))
+            MATRIX_JSON="${MATRIX_JSON}{\"batch\":${i},\"start\":${START_IDX}}"
           done
           MATRIX_JSON="${MATRIX_JSON}]}"
           
@@ -132,8 +133,8 @@ jobs:
           BATCH_NUM=${{ steps.prep-batch.outputs.batch_num }}
           BATCH_SIZE=${{ github.event.inputs.batch_size || '10' }}
           
-          # Calculate batch start position
-          BATCH_START=$((BATCH_NUM * BATCH_SIZE))
+          # CHANGED: Use the start value from the matrix instead of calculating it
+          BATCH_START=${{ matrix.start }}
           
           echo "Running scraper for batch $BATCH_NUM..."
           echo "Batch start: $BATCH_START, size: $BATCH_SIZE"
