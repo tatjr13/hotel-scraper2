@@ -193,78 +193,78 @@ async def scrape_city(context, city, dates_to_check, city_index):
                     logging.warning(f"Not on search page. URL: {page.url}")
                     continue
 
-                # Sort by highest miles
+                # Sort by highest miles - FIXED VERSION
                 current_url = page.url
                 if "sort=" not in current_url:
-                    sorted_url = current_url + ("&sort=miles_desc" if "?" in current_url else "?sort=miles_desc")
-                    sort_params = ["miles_desc", "milesHighest", "miles", "points_desc"]
-                    for sort_param in sort_params:
-                        try:
-                            test_url = current_url + (f"&sort={sort_param}" if "?" in current_url else f"?sort={sort_param}")
-                            await page.goto(test_url, wait_until='networkidle', timeout=30000)
-                            await page.wait_for_timeout(3000)
-                            if "sort=" in page.url:
-                                logging.info(f"Successfully sorted by: {sort_param}")
-                                break
-                        except:
-                            continue
+                    # The correct parameter is "milesHighest" not "miles_desc"
+                    sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
+                    await page.goto(sorted_url, wait_until='networkidle', timeout=30000)
+                    await page.wait_for_timeout(3000)
+                    logging.info("Sorted by highest miles")
                 else:
                     logging.info("Results already sorted")
 
-                # Extract hotels
+                # Extract hotels - FIXED VERSION
                 hotels = await page.evaluate('''() => {
                     const results = [];
-                    const cardSelectors = [
-                        '[data-testid*="hotel"]',
-                        '[class*="hotel-card"]',
-                        '[class*="property-card"]',
-                        '[class*="HotelCard"]',
-                        '[class*="PropertyCard"]',
-                        'article[class*="hotel"]',
-                        'div[class*="listing"]'
-                    ];
-                    let cards = [];
-                    for (const selector of cardSelectors) {
-                        cards = document.querySelectorAll(selector);
-                        if (cards.length > 0) break;
-                    }
+                    const cards = document.querySelectorAll('[data-testid*="hotel"], [class*="hotel-card"], article, div[class*="property"]');
+                    
+                    console.log('Found ' + cards.length + ' hotel cards');
+                    
                     for (let i = 0; i < Math.min(cards.length, 30); i++) {
                         const card = cards[i];
                         const text = card.textContent || '';
-                        const earnPattern = /Earn\\s+([\\d,]+)\\s+miles/i;
-                        const earnMatch = text.match(earnPattern);
-                        if (earnMatch) {
-                            const milesAmount = parseInt(earnMatch[1].replace(/,/g, ''));
-                            if (milesAmount === 10000) {
-                                // Find hotel name
-                                const nameSelectors = [
-                                    '[data-testid="hotel-name"]',
-                                    '[class*="hotel-name"]',
-                                    '[class*="property-name"]',
-                                    'h3', 'h2', 'h4',
-                                    '[class*="title"]'
-                                ];
-                                let name = '';
-                                for (const sel of nameSelectors) {
-                                    const nameEl = card.querySelector(sel);
-                                    if (nameEl && nameEl.textContent) {
-                                        name = nameEl.textContent.trim();
+                        
+                        // Look for "Earn 10,000 miles" OR "Earn 10000 miles" with any text after
+                        // This will match "Earn 10,000 miles per stay" etc.
+                        if ((text.includes('Earn 10,000 miles') || text.includes('Earn 10000 miles')) && 
+                            !text.includes('Earn 1,000 miles') && 
+                            !text.includes('Earn 1000 miles')) {
+                            
+                            // Find hotel name - look for h3, h2, or elements with hotel name classes
+                            let name = '';
+                            const nameSelectors = [
+                                '[data-testid="hotel-name"]',
+                                'h3',
+                                'h2',
+                                '[class*="hotel-name"]',
+                                '[class*="property-name"]',
+                                'a[href*="/hotel/"]'
+                            ];
+                            
+                            for (const sel of nameSelectors) {
+                                const nameEl = card.querySelector(sel);
+                                if (nameEl && nameEl.textContent) {
+                                    const tempName = nameEl.textContent.trim();
+                                    // Make sure it's actually a hotel name, not other text
+                                    if (tempName && tempName.length > 3 && !tempName.includes('$') && !tempName.includes('miles')) {
+                                        name = tempName;
                                         break;
                                     }
                                 }
-                                // Extract price - look for total price
-                                const priceMatch = text.match(/\\$(\\d+(?:,\\d+)?(?:\\.\\d{2})?)/);
-                                const price = priceMatch ? parseFloat(priceMatch[1].replace(',', '')) : null;
-                                if (name && price) {
-                                    results.push({
-                                        name: name,
-                                        price: price,
-                                        points: 10000
-                                    });
-                                }
+                            }
+                            
+                            // Find price - look for dollar amounts
+                            let price = null;
+                            // Match prices like $389, $1,234, etc.
+                            const priceMatches = text.match(/\\$(\d{1,3}(?:,\d{3})*(?:\\.\\d{2})?)/g);
+                            if (priceMatches && priceMatches.length > 0) {
+                                // Usually the last price is the total
+                                const lastPrice = priceMatches[priceMatches.length - 1];
+                                price = parseFloat(lastPrice.replace('$', '').replace(/,/g, ''));
+                            }
+                            
+                            if (name && price) {
+                                console.log('Found 10K hotel: ' + name + ' at $' + price);
+                                results.push({
+                                    name: name,
+                                    price: price,
+                                    points: 10000
+                                });
                             }
                         }
                     }
+                    
                     return results;
                 }''')
 
