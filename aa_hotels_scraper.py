@@ -247,58 +247,46 @@ async def scrape_city(context, city, dates_to_check, city_index):
                         logging.info("Results already sorted")
                     
                     # Extract hotels
-                    hotels = await page.evaluate('''() => {
+                    hotels = await page.evaluate("""() => {
                         const results = [];
                         
-                        // Multiple possible selectors for hotel cards
-                        const cardSelectors = [
-                            '[data-testid*="hotel"]',
-                            '[class*="hotel-card"]',
-                            '[class*="property-card"]',
-                            '[class*="HotelCard"]',
-                            '[class*="PropertyCard"]',
-                            'article[class*="hotel"]',
-                            'div[class*="listing"]'
-                        ];
-                        
-                        let cards = [];
-                        for (const selector of cardSelectors) {
-                            cards = document.querySelectorAll(selector);
-                            if (cards.length > 0) break;
-                        }
-                        
-                        console.log(`Found ${cards.length} hotel cards`);
+                        // Find all hotel cards
+                        const cards = document.querySelectorAll('[data-testid*="hotel"], [class*="hotel-card"], article');
                         
                         for (let i = 0; i < Math.min(cards.length, 30); i++) {
                             const card = cards[i];
                             const text = card.textContent || '';
                             
-                            // Look for miles/points earning information
-                            // Must be in context of "Earn" and followed by "miles"
-                            const earnPattern = /Earn\\s+([\\d,]+)\\s+miles/i;
-                            const earnMatch = text.match(earnPattern);
-                            
-                            if (earnMatch) {
-                                const milesAmount = parseInt(earnMatch[1].replace(/,/g, ''));
+                            // Check if this card mentions earning 10,000 miles
+                            if (text.includes('Earn 10,000 miles') || text.includes('Earn 10000 miles')) {
+                                // Find hotel name
+                                let name = '';
+                                const nameEl = card.querySelector('h3, h2, [data-testid="hotel-name"], [class*="hotel-name"]');
+                                if (nameEl) {
+                                    name = nameEl.textContent.trim();
+                                }
                                 
-                                // Only look for exactly 10,000 miles hotels
-                                if (milesAmount === 10000) {
-                                    // Find hotel name
-                                    const nameSelectors = [
-                                        '[data-testid="hotel-name"]',
-                                        '[class*="hotel-name"]',
-                                        '[class*="property-name"]',
-                                        'h3', 'h2', 'h4',
-                                        '[class*="title"]'
-                                    ];
-                                    
-                                    let name = '';
-                                    for (const sel of nameSelectors) {
-                                        const nameEl = card.querySelector(sel);
-                                        if (nameEl && nameEl.textContent) {
-                                            name = nameEl.textContent.trim();
-                                            if (name && !name.includes('
-                    
+                                // Find price
+                                let price = null;
+                                const priceMatches = text.match(/\$([0-9,]+)/g);
+                                if (priceMatches && priceMatches.length > 0) {
+                                    // Get the last price (usually the total)
+                                    const lastPrice = priceMatches[priceMatches.length - 1];
+                                    price = parseFloat(lastPrice.replace('$', '').replace(',', ''));
+                                }
+                                
+                                if (name && price) {
+                                    results.push({
+                                        name: name,
+                                        price: price,
+                                        points: 10000
+                                    });
+                                }
+                            }
+                        }
+                        
+                        return results;
+                    }""")                    
                     # Process results
                     for hotel in hotels:
                         all_results.append({
