@@ -374,8 +374,8 @@ async def main():
     print(f"Processing cities {batch_start} to {batch_start + batch_size - 1}")
     print(f"{'='*80}\n")
     
-    # Now process_batch doesn't need start_index anymore since it reads the batch file
-    results = await process_batch(0, batch_size)  # Just pass 0 and batch_size
+    # Now process_batch doesn't need any parameters
+    results = await process_batch()
     
     if results:
         batch_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
