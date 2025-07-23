@@ -375,7 +375,7 @@ async def main():
     print(f"{'='*80}\n")
     
     # PASS THE CITIES LIST DIRECTLY TO PROCESS_BATCH
-    results = await process_batch(batch_cities)
+    results = await process_batch(batch_start, batch_size)
     
     if results:
         batch_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
