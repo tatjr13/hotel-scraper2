@@ -226,15 +226,31 @@ async def scrape_city(context, city, dates_to_check, city_index):
                     # Sort by highest miles
                     current_url = page.url
                     if "sort=" not in current_url:
-                        sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
-                        await page.goto(sorted_url, wait_until='networkidle', timeout=30000)
-                        await page.wait_for_timeout(3000)
+                        # Use the correct sort parameter for miles in descending order
+                        sorted_url = current_url + ("&sort=miles_desc" if "?" in current_url else "?sort=miles_desc")
+                        # Try different sort parameters if the first doesn't work
+                        sort_params = ["miles_desc", "milesHighest", "miles", "points_desc"]
+                        
+                        for sort_param in sort_params:
+                            try:
+                                test_url = current_url + (f"&sort={sort_param}" if "?" in current_url else f"?sort={sort_param}")
+                                await page.goto(test_url, wait_until='networkidle', timeout=30000)
+                                await page.wait_for_timeout(3000)
+                                
+                                # Check if sort worked by looking at the URL
+                                if "sort=" in page.url:
+                                    logging.info(f"Successfully sorted by: {sort_param}")
+                                    break
+                            except:
+                                continue
+                    else:
+                        logging.info("Results already sorted")
                     
                     # Extract hotels
                     hotels = await page.evaluate('''() => {
                         const results = [];
                         
-                        // Multiple possible selectors
+                        // Multiple possible selectors for hotel cards
                         const cardSelectors = [
                             '[data-testid*="hotel"]',
                             '[class*="hotel-card"]',
@@ -251,54 +267,179 @@ async def scrape_city(context, city, dates_to_check, city_index):
                             if (cards.length > 0) break;
                         }
                         
-                        // If still no cards, try a more general approach
-                        if (cards.length === 0) {
-                            const allElements = document.querySelectorAll('*');
-                            cards = Array.from(allElements).filter(el => {
-                                const text = el.textContent || '';
-                                return text.includes('miles') && text.includes('$') && 
-                                       (text.includes('10,000') || text.includes('10000'));
-                            }).slice(0, 30);
-                        }
+                        console.log(`Found ${cards.length} hotel cards`);
                         
                         for (let i = 0; i < Math.min(cards.length, 30); i++) {
                             const card = cards[i];
                             const text = card.textContent || '';
                             
-                            // Check for 10K points
-                            if ((text.includes('10,000') || text.includes('10000')) && 
-                                (text.includes('miles') || text.includes('points'))) {
+                            // Look for miles/points earning information
+                            // Must be in context of "Earn" and followed by "miles"
+                            const earnPattern = /Earn\\s+([\\d,]+)\\s+miles/i;
+                            const earnMatch = text.match(earnPattern);
+                            
+                            if (earnMatch) {
+                                const milesAmount = parseInt(earnMatch[1].replace(/,/g, ''));
                                 
-                                // Find hotel name
-                                const nameSelectors = [
-                                    '[data-testid="hotel-name"]',
-                                    '[class*="hotel-name"]',
-                                    '[class*="property-name"]',
-                                    'h3', 'h2', 'h4',
-                                    '[class*="title"]'
-                                ];
-                                
-                                let name = '';
-                                for (const sel of nameSelectors) {
-                                    const nameEl = card.querySelector(sel);
-                                    if (nameEl && nameEl.textContent) {
-                                        name = nameEl.textContent.trim();
-                                        if (name && !name.includes('$') && !name.includes('miles')) {
-                                            break;
+                                // Only look for exactly 10,000 miles hotels
+                                if (milesAmount === 10000) {
+                                    // Find hotel name
+                                    const nameSelectors = [
+                                        '[data-testid="hotel-name"]',
+                                        '[class*="hotel-name"]',
+                                        '[class*="property-name"]',
+                                        'h3', 'h2', 'h4',
+                                        '[class*="title"]'
+                                    ];
+                                    
+                                    let name = '';
+                                    for (const sel of nameSelectors) {
+                                        const nameEl = card.querySelector(sel);
+                                        if (nameEl && nameEl.textContent) {
+                                            name = nameEl.textContent.trim();
+                                            if (name && !name.includes('
+                    
+                    # Process results
+                    for hotel in hotels:
+                        all_results.append({
+                            'City': city,
+                            'Hotel': hotel['name'],
+                            'Price': hotel['price'],
+                            'Points': hotel['points'],
+                            'Check-in': checkin_date,
+                            'Check-out': checkout_date,
+                            'Cost per Point': hotel['price'] / hotel['points']
+                        })
+                    
+                    logging.info(f"Found {len(hotels)} hotels with 10K points")
+                    
+                except Exception as e:
+                    logging.error(f"Error scraping {city} for {checkin_date}: {str(e)}")
+                    await page.screenshot(path=f"error_{city.replace(',', '_').replace(' ', '_')}_{date_index}.png")
+                    
+            except Exception as e:
+                logging.error(f"Navigation error for {city}: {str(e)}")
+                
+    finally:
+        await page.close()
+    
+    return all_results
+
+async def process_batch(start_index, batch_size):
+    """Process a batch of cities"""
+    # Load cities
+    cities_file = os.getenv('CITIES_FILE', 'cities_top200.txt')
+    
+    if os.path.exists(cities_file):
+        with open(cities_file, 'r') as f:
+            all_cities = [line.strip() for line in f if line.strip()]
+    else:
+        all_cities = ["Bangkok, Thailand", "Istanbul, Turkey", "London, UK", "Dubai, UAE", "Singapore"]
+    
+    # Get batch
+    cities = all_cities[start_index:start_index + batch_size]
+    logging.info(f"Processing batch: {len(cities)} cities starting from index {start_index}")
+    
+    # Generate dates
+    dates_to_check = []
+    for days_ahead in [1, 7, 14]:  # Tomorrow, 1 week, 2 weeks
+        checkin = datetime.now() + timedelta(days=days_ahead)
+        checkout = checkin + timedelta(days=1)
+        dates_to_check.append((
+            checkin.strftime("%m/%d/%Y"),
+            checkout.strftime("%m/%d/%Y")
+        ))
+    
+    all_results = []
+    
+    async with async_playwright() as p:
+        browser = await create_browser(p)
+        context = await create_context(browser)
+        
+        try:
+            for i, city in enumerate(cities):
+                logging.info(f"\n{'='*60}")
+                logging.info(f"City {i+1}/{len(cities)}: {city}")
+                logging.info(f"{'='*60}")
+                
+                city_results = await scrape_city(context, city, dates_to_check, i)
+                
+                if city_results:
+                    # Find cheapest
+                    cheapest = min(city_results, key=lambda x: x['Price'])
+                    all_results.append(cheapest)
+                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
+                else:
+                    logging.warning(f"❌ No 10K hotels found in {city}")
+                
+                # Delay between cities
+                if i < len(cities) - 1:
+                    delay = random.uniform(10, 20)
+                    logging.info(f"Waiting {delay:.1f}s before next city...")
+                    await asyncio.sleep(delay)
+                    
+        finally:
+            await context.close()
+            await browser.close()
+    
+    return all_results
+
+async def main():
+    # Get batch parameters from environment
+    batch_start = int(os.getenv('BATCH_START', 0))
+    batch_size = int(os.getenv('BATCH_SIZE', 10))
+    
+    # Process batch
+    results = await process_batch(batch_start, batch_size)
+    
+    # Save results
+    if results:
+        # Save batch results
+        batch_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
+        df = pd.DataFrame(results)
+        df.to_csv(batch_file, index=False)
+        logging.info(f"Saved {len(results)} results to {batch_file}")
+        
+        # Also save/update master file
+        master_file = "cheapest_10k_hotels_all.csv"
+        if os.path.exists(master_file):
+            existing_df = pd.read_csv(master_file)
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            # Remove duplicates keeping the latest
+            combined_df = combined_df.drop_duplicates(subset=['City'], keep='last')
+            combined_df.to_csv(master_file, index=False)
+        else:
+            df.to_csv(master_file, index=False)
+        
+        # Print summary
+        print(f"\n{'='*60}")
+        print(f"BATCH {batch_start} RESULTS:")
+        print(f"{'='*60}")
+        for r in sorted(results, key=lambda x: x['Price']):
+            print(f"{r['City']}: ${r['Price']:.2f} - {r['Hotel']}")
+    else:
+        logging.warning("No results found in this batch")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+) && !name.includes('miles')) {
+                                                break;
+                                            }
                                         }
                                     }
-                                }
-                                
-                                // Extract price
-                                const priceMatch = text.match(/\\$(\\d+(?:,\\d+)?(?:\\.\\d{2})?)/);
-                                const price = priceMatch ? parseFloat(priceMatch[1].replace(',', '')) : null;
-                                
-                                if (name && price) {
-                                    results.push({
-                                        name: name,
-                                        price: price,
-                                        points: 10000
-                                    });
+                                    
+                                    // Extract price - look for total price
+                                    const priceMatch = text.match(/\\$(\\d+(?:,\\d+)?(?:\\.\\d{2})?)/);
+                                    const price = priceMatch ? parseFloat(priceMatch[1].replace(',', '')) : null;
+                                    
+                                    if (name && price) {
+                                        console.log(`Found 10K hotel: ${name} at ${price}`);
+                                        results.push({
+                                            name: name,
+                                            price: price,
+                                            points: 10000
+                                        });
+                                    }
                                 }
                             }
                         }
