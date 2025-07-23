@@ -56,7 +56,7 @@ class ProxyManager:
             logging.error(f"Error parsing proxy {proxy_url}: {str(e)}")
             return None
 
-async def create_browser_with_proxy(playwright, proxy_manager):
+async def create_browser_with_proxy(playwright, proxy_manager, retry_without_proxy=True):
     """Create browser with proxy from pool"""
     proxy_url = proxy_manager.get_next_proxy()
     
@@ -71,22 +71,33 @@ async def create_browser_with_proxy(playwright, proxy_manager):
         '--disable-java'
     ]
     
-    if proxy_url:
+    if proxy_url and retry_without_proxy:
         proxy_config = proxy_manager.parse_proxy(proxy_url)
         if proxy_config:
             logging.info(f"Using proxy #{proxy_manager.current_index}")
-            browser = await playwright.chromium.launch(
-                headless=True,
-                proxy=proxy_config,
-                args=browser_args
-            )
-        else:
-            logging.warning("Failed to parse proxy, running without proxy")
-            browser = await playwright.chromium.launch(headless=True, args=browser_args)
-    else:
-        logging.info("No proxy available, running without proxy")
-        browser = await playwright.chromium.launch(headless=True, args=browser_args)
+            try:
+                browser = await playwright.chromium.launch(
+                    headless=True,
+                    proxy=proxy_config,
+                    args=browser_args
+                )
+                # Quick test
+                context = await browser.new_context()
+                page = await context.new_page()
+                try:
+                    await page.goto('https://www.aadvantagehotels.com/', timeout=15000)
+                    await page.close()
+                    await context.close()
+                    return browser
+                except Exception as e:
+                    logging.warning(f"Proxy failed test: {str(e)}")
+                    await browser.close()
+                    # Fall through to no-proxy
+            except Exception as e:
+                logging.warning(f"Failed to launch with proxy: {str(e)}")
     
+    logging.info("Running without proxy (fallback)")
+    browser = await playwright.chromium.launch(headless=True, args=browser_args)
     return browser
 
 async def create_context(browser):
@@ -128,18 +139,39 @@ async def scrape_city(page, city, dates_to_check):
                 await page.goto("https://www.aadvantagehotels.com/", wait_until='domcontentloaded', timeout=30000)
                 await page.wait_for_timeout(random.randint(2000, 3000))
                 
+                # Debug: Save screenshot
+                await page.screenshot(path=f"debug_homepage_{city.replace(',', '_')}.png")
+                
                 # Check for bot detection
                 content = await page.content()
-                if "something went wrong" in content.lower():
-                    logging.error("Bot detection triggered!")
+                page_title = await page.title()
+                logging.info(f"Page title: {page_title}")
+                
+                if "something went wrong" in content.lower() or "access denied" in content.lower():
+                    logging.error("Bot detection or access denied!")
+                    # Save the error page
+                    with open(f"error_page_{city.replace(',', '_')}.html", 'w') as f:
+                        f.write(content)
                     return []
                 
-                # Fill city
-                city_input = page.locator('input[placeholder*="city" i], input[placeholder*="City" i]').first
-                await city_input.click()
-                await page.wait_for_timeout(random.randint(500, 1000))
-                await city_input.fill(city)
-                await page.wait_for_timeout(random.randint(1500, 2000))
+                # Wait for and fill city input
+                try:
+                    await page.wait_for_selector('input[placeholder*="city" i], input[placeholder*="City" i]', timeout=10000)
+                    city_input = page.locator('input[placeholder*="city" i], input[placeholder*="City" i]').first
+                    await city_input.click()
+                    await page.wait_for_timeout(random.randint(500, 1000))
+                    await city_input.fill(city)
+                    await page.wait_for_timeout(random.randint(1500, 2000))
+                except Exception as e:
+                    logging.error(f"Failed to find city input: {str(e)}")
+                    # Try alternative selector
+                    try:
+                        city_input = page.locator('input[type="text"]').first
+                        await city_input.click()
+                        await city_input.fill(city)
+                        await page.wait_for_timeout(random.randint(1500, 2000))
+                    except:
+                        raise Exception("Could not find city input field")
                 
                 # Select from dropdown
                 try:
