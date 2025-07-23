@@ -1,4 +1,3 @@
-import sys
 import asyncio
 import logging
 import pandas as pd
@@ -163,17 +162,9 @@ async def scrape_city(context, city, dates_to_check, city_index):
                 await page.wait_for_timeout(5000)
 
                 # Verify we're on search page
-                current_url = page.url
-                logging.info(f"Current URL: {current_url}")
-                if "/search" not in current_url:
-                    logging.warning(f"Not on search page. URL: {current_url}")
+                if "/search" not in page.url:
+                    logging.warning(f"Not on search page. URL: {page.url}")
                     continue
-
-                # DEBUG: Check page content
-                page_text = await page.inner_text('body')
-                logging.info(f"DEBUG - Page contains 'Earn 10,000 miles': {page_text.count('Earn 10,000 miles')}")
-                logging.info(f"DEBUG - Page contains 'Earn 10000 miles': {page_text.count('Earn 10000 miles')}")
-                logging.info(f"DEBUG - Page contains 'no results': {'no results' in page_text.lower()}")
 
                 # Select "Earn miles" - handle overlay blocking issue
                 try:
@@ -238,84 +229,17 @@ async def scrape_city(context, city, dates_to_check, city_index):
                 # Take screenshot to verify sort worked
                 await page.screenshot(path=f"debug_{city.replace(',', '_').replace(' ', '_')}_{date_index}_sorted.png")
 
-                # DEBUG: Try multiple selectors to find hotel cards
-                hotel_selectors = [
-                    '[data-testid*="hotel"]',
-                    '[class*="hotel-card"]',
-                    '[class*="property"]',
-                    'article',
-                    'div[class*="result"]',
-                    'div[class*="listing"]'
-                ]
-                
-                for selector in hotel_selectors:
-                    count = await page.locator(selector).count()
-                    if count > 0:
-                        logging.info(f"DEBUG - Found {count} elements with selector: {selector}")
-                        break
-
-                # Extract hotels with heavy debugging
+                # Extract hotels with improved price extraction
                 hotels = await page.evaluate('''() => {
                     const results = [];
+                    const cards = document.querySelectorAll('[data-testid*="hotel"], [class*="hotel-card"], article, div[class*="property"]');
                     
-                    // Try multiple selectors
-                    const selectors = [
-                        '[data-testid*="hotel"]',
-                        '[class*="hotel-card"]',
-                        '[class*="property"]',
-                        'article',
-                        'div[class*="result"]',
-                        'div[class*="listing"]',
-                        '*' // Last resort - check all elements
-                    ];
-                    
-                    let cards = [];
-                    for (const selector of selectors) {
-                        cards = document.querySelectorAll(selector);
-                        if (cards.length > 0) {
-                            console.log(`Using selector: ${selector}, found ${cards.length} cards`);
-                            break;
-                        }
-                    }
-                    
-                    if (cards.length === 0) {
-                        // If no cards found, search all elements for 10K text
-                        const allElements = document.querySelectorAll('*');
-                        console.log(`No cards found, searching all ${allElements.length} elements`);
-                        cards = allElements;
-                    }
-                    
-                    console.log('Total cards/elements to check:', cards.length);
-                    let debugStats = {
-                        totalCards: cards.length,
-                        ihgSkipped: 0,
-                        cheapSkipped: 0,
-                        tenKFound: 0,
-                        withPrice: 0,
-                        withName: 0
-                    };
-                    
-                    for (let i = 0; i < Math.min(cards.length, 100); i++) {
+                    for (let i = 0; i < Math.min(cards.length, 30); i++) {
                         const card = cards[i];
                         const text = card.textContent || '';
                         
-                        // Skip IHG/InterContinental hotels
-                        const lowerText = text.toLowerCase();
-                        if (lowerText.includes('ihg') || 
-                            lowerText.includes('intercontinental') || 
-                            lowerText.includes('holiday inn') ||
-                            lowerText.includes('crowne plaza') ||
-                            lowerText.includes('kimpton') ||
-                            lowerText.includes('candlewood')) {
-                            debugStats.ihgSkipped++;
-                            continue;
-                        }
-                        
                         if ((text.includes('Earn 10,000 miles') || text.includes('Earn 10000 miles')) &&
                             !text.includes('Earn 1,000 miles') && !text.includes('Earn 1000 miles')) {
-                            
-                            debugStats.tenKFound++;
-                            console.log(`Found 10K text in element ${i}:`, text.substring(0, 200));
                             
                             let name = '';
                             const nameSelectors = [
@@ -327,35 +251,20 @@ async def scrape_city(context, city, dates_to_check, city_index):
                                 'a[href*="/hotel/"]'
                             ];
                             
-                            // Try to find name in the card or its children
                             for (const sel of nameSelectors) {
                                 const nameEl = card.querySelector(sel);
                                 if (nameEl && nameEl.textContent) {
                                     const tempName = nameEl.textContent.trim();
                                     if (tempName && tempName.length > 3 && !tempName.includes('$')) {
                                         name = tempName;
-                                        debugStats.withName++;
                                         break;
                                     }
                                 }
                             }
                             
-                            // If no name found, try to extract from text
-                            if (!name) {
-                                const lines = text.split('\\n');
-                                for (const line of lines) {
-                                    if (line.trim() && line.trim().length > 3 && 
-                                        !line.includes('$') && !line.includes('miles') && 
-                                        !line.includes('Earn')) {
-                                        name = line.trim();
-                                        debugStats.withName++;
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            // Price extraction
+                            // Improved price extraction
                             let price = null;
+                            // Look for price patterns like "$322" or "322 USD" or "Total (1 night) $322"
                             const pricePatterns = [
                                 /Total[^$]*\\$(\d{1,4}(?:,\d{3})*(?:\\.\\d{2})?)/i,
                                 /\\$(\d{1,4}(?:,\d{3})*(?:\\.\\d{2})?)\\s*(?:Total|per|\\/)/i,
@@ -366,50 +275,29 @@ async def scrape_city(context, city, dates_to_check, city_index):
                                 const match = text.match(pattern);
                                 if (match) {
                                     const extractedPrice = parseFloat(match[1].replace(/,/g, ''));
+                                    // Sanity check - hotel prices should be between $20 and $5000
                                     if (extractedPrice >= 20 && extractedPrice <= 5000) {
                                         price = extractedPrice;
-                                        debugStats.withPrice++;
                                         break;
                                     }
                                 }
                             }
                             
-                            // Skip cheap hotels
-                            if (price && price < 30) {
-                                console.log('Skipping cheap hotel:', name, 'at $', price);
-                                debugStats.cheapSkipped++;
-                                continue;
-                            }
-                            
                             if (name && price) {
-                                console.log('SUCCESS - Adding hotel:', name, 'at $', price);
+                                console.log('Found 10K hotel:', name, 'at $', price);
                                 results.push({
                                     name: name,
                                     price: price,
                                     points: 10000
                                 });
-                            } else {
-                                console.log('FAILED - Missing data. Name:', name, 'Price:', price);
                             }
                         }
                     }
                     
-                    console.log('DEBUG STATS:', JSON.stringify(debugStats));
-                    console.log('Final results count:', results.length);
-                    return {results, debugStats};
+                    return results;
                 }''')
 
-                # Log debug stats
-                if hotels.debugStats) {
-                    logging.info(f"DEBUG STATS: {hotels.debugStats}")
-                
-                # Use the results
-                hotel_results = hotels.results if hasattr(hotels, 'results') else hotels
-                if isinstance(hotels, dict) and 'results' in hotels:
-                    hotel_results = hotels['results']
-                    logging.info(f"Debug stats: Total cards: {hotels['debugStats']['totalCards']}, 10K found: {hotels['debugStats']['tenKFound']}, With price: {hotels['debugStats']['withPrice']}, With name: {hotels['debugStats']['withName']}")
-
-                for hotel in hotel_results:
+                for hotel in hotels:
                     all_results.append({
                         'City': city,
                         'Hotel': hotel['name'],
@@ -419,17 +307,7 @@ async def scrape_city(context, city, dates_to_check, city_index):
                         'Check-out': checkout_date,
                         'Cost per Point': hotel['price'] / hotel['points']
                     })
-                
-                logging.info(f"Found {len(hotel_results)} hotels with 10K points after all filters")
-                
-                if len(hotel_results) == 0:
-                    logging.warning(f"NO HOTELS FOUND for {city} on {checkin_date}")
-                    # Save a debug HTML file
-                    debug_html = await page.content()
-                    with open(f"debug_html_{city.replace(',', '_').replace(' ', '_')}_{date_index}.html", "w", encoding='utf-8') as f:
-                        f.write(debug_html)
-                    logging.info(f"Saved debug HTML file for inspection")
-
+                logging.info(f"Found {len(hotels)} hotels with 10K points")
             except Exception as e:
                 logging.error(f"Error scraping {city} for {checkin_date}: {str(e)}")
                 await page.screenshot(path=f"error_{city.replace(',', '_').replace(' ', '_')}_{date_index}.png")
@@ -437,19 +315,17 @@ async def scrape_city(context, city, dates_to_check, city_index):
         await page.close()
     return all_results
 
-async def process_batch(batch_start, batch_size):
-    cities_file = 'cities_top200.txt'
+async def process_batch(start_index, batch_size):
+    cities_file = os.getenv('CITIES_FILE', 'cities_top200.txt')
     if os.path.exists(cities_file):
         with open(cities_file, 'r') as f:
             all_cities = [line.strip() for line in f if line.strip()]
     else:
         all_cities = ["Bangkok, Thailand", "Istanbul, Turkey", "London, UK", "Dubai, UAE", "Singapore"]
-    
-    cities = all_cities[batch_start:batch_start + batch_size]
-    logging.info(f"Processing batch: {len(cities)} cities starting from index {batch_start}")
+    cities = all_cities[start_index:start_index + batch_size]
+    logging.info(f"Processing batch: {len(cities)} cities starting from index {start_index}")
     logging.info(f"First city in this batch: {cities[0] if cities else 'None'}")
     logging.info(f"Last city in this batch: {cities[-1] if cities else 'None'}")
-    
     dates_to_check = []
     for days_ahead in [0, 1, 2]:
         checkin = datetime.now() + timedelta(days=days_ahead)
@@ -465,13 +341,12 @@ async def process_batch(batch_start, batch_size):
         try:
             for i, city in enumerate(cities):
                 logging.info(f"\n{'='*60}")
-                logging.info(f"City {batch_start+i+1}/{len(all_cities)}: {city}")
+                logging.info(f"City {i+1}/{len(cities)}: {city}")
                 logging.info(f"{'='*60}")
-                city_results = await scrape_city(context, city, dates_to_check, batch_start + i)
+                city_results = await scrape_city(context, city, dates_to_check, i)
                 if city_results:
                     cheapest = min(city_results, key=lambda x: x['Price'])
                     all_results.append(cheapest)
-                    # Updated to include date in the output
                     logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f} for {cheapest['Check-in']} to {cheapest['Check-out']}")
                 else:
                     logging.warning(f"❌ No 10K hotels found in {city}")
@@ -485,11 +360,9 @@ async def process_batch(batch_start, batch_size):
     return all_results
 
 async def main():
-    # Use CLI arguments for batching
-    batch_start = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    batch_size = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+    batch_start = int(os.getenv('BATCH_START', 0))
+    batch_size = int(os.getenv('BATCH_SIZE', 10))
     
-    # Print run information
     print(f"\n{'='*80}")
     print(f"AAdvantage Hotel Scraper - Starting Run")
     print(f"Run Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')}")
