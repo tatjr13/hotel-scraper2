@@ -360,13 +360,18 @@ async def process_batch(start_index, batch_size):
     return all_results
 
 async def main():
-    batch_start = int(os.getenv('BATCH_START', 0))
+    # FIXED: Use BATCH_NUM from environment variable and calculate the actual start index
+    batch_num = int(os.getenv('BATCH_NUM', 0))
     batch_size = int(os.getenv('BATCH_SIZE', 10))
+    batch_start = batch_num * batch_size  # THIS IS THE KEY FIX!
     
     print(f"\n{'='*80}")
     print(f"AAdvantage Hotel Scraper - Starting Run")
     print(f"Run Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')}")
-    print(f"Batch: {batch_start} to {batch_start + batch_size - 1}")
+    print(f"Batch Number: {batch_num}")
+    print(f"Batch Start Index: {batch_start}")
+    print(f"Batch Size: {batch_size}")
+    print(f"Processing cities {batch_start} to {batch_start + batch_size - 1}")
     print(f"{'='*80}\n")
     
     results = await process_batch(batch_start, batch_size)
