@@ -163,7 +163,7 @@ async def scrape_city(context, city, dates_to_check, city_index):
                 await page.wait_for_load_state('networkidle', timeout=30000)
                 await page.wait_for_timeout(5000)
 
-                # Toggle "Earn miles"
+                # -- FIX: Always select "Earn miles" and sort after EACH search --
                 try:
                     earn_miles_radio = page.locator('input[type="radio"][value="earn" i], input[type="radio"][id*="earn" i], label:has-text("Earn miles")')
                     if await earn_miles_radio.count() > 0:
@@ -180,7 +180,6 @@ async def scrape_city(context, city, dates_to_check, city_index):
                 except Exception as e:
                     logging.warning(f"Could not select 'Earn miles' radio: {e}")
 
-                # Click the sort dropdown and select "Most miles earned"
                 try:
                     sort_dropdown = page.locator('select[name="sort"], select[aria-label*="sort" i]')
                     if await sort_dropdown.count() > 0:
