@@ -488,15 +488,17 @@ async def process_batch(start_index, batch_size):
     cities = all_cities[start_index:start_index + batch_size]
     logging.info(f"Processing batch: {len(cities)} cities starting from index {start_index}")
     
-    # Generate dates
+    # Generate dates - today, tomorrow, day after tomorrow
     dates_to_check = []
-    for days_ahead in [1, 7, 14]:  # Tomorrow, 1 week, 2 weeks
+    for days_ahead in [0, 1, 2]:  # Today, tomorrow, day after
         checkin = datetime.now() + timedelta(days=days_ahead)
         checkout = checkin + timedelta(days=1)
         dates_to_check.append((
             checkin.strftime("%m/%d/%Y"),
             checkout.strftime("%m/%d/%Y")
         ))
+    
+    logging.info(f"Checking dates: {', '.join([d[0] for d in dates_to_check])}")
     
     all_results = []
     
