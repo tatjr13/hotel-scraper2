@@ -6,7 +6,6 @@ from playwright.async_api import async_playwright
 import random
 import os
 import re
-import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -346,7 +345,7 @@ async def process_batch(start_index, batch_size):
                 if city_results:
                     cheapest = min(city_results, key=lambda x: x['Price'])
                     all_results.append(cheapest)
-                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f} on {cheapest['Check-in']}")
+                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
                 else:
                     logging.warning(f"❌ No 10K hotels found in {city}")
                 if i < len(cities) - 1:
@@ -371,110 +370,17 @@ async def main():
         if os.path.exists(master_file):
             existing_df = pd.read_csv(master_file)
             combined_df = pd.concat([existing_df, df], ignore_index=True)
-            # Keep only the cheapest hotel per city across all batches
-            combined_df = combined_df.sort_values('Price').drop_duplicates(subset=['City'], keep='first')
+            combined_df = combined_df.drop_duplicates(subset=['City'], keep='last')
             combined_df.to_csv(master_file, index=False)
         else:
             df.to_csv(master_file, index=False)
-        
-        # Enhanced results summary
-        print(f"\n{'='*80}")
-        print(f"BATCH {batch_start} RESULTS - 10,000 POINT HOTELS")
-        print(f"Run Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*80}")
-        
-        # Sort by price for display
-        sorted_results = sorted(results, key=lambda x: x['Price'])
-        
-        # Top 10 cheapest cities
-        print("\n🏆 TOP 10 CHEAPEST 10K POINT HOTELS:")
-        print(f"{'Rank':<5} {'City':<25} {'Hotel':<35} {'Price':<10} {'Date':<12} {'$/Point':<10}")
-        print("-" * 107)
-        
-        for i, r in enumerate(sorted_results[:10], 1):
-            print(f"{i:<5} {r['City']:<25} {r['Hotel'][:34]:<35} ${r['Price']:<9.2f} {r['Check-in']:<12} ${r['Cost per Point']:<9.4f}")
-        
-        # Summary statistics
-        print(f"\n📊 SUMMARY STATISTICS:")
-        print(f"Total cities with 10K hotels: {len(results)}")
-        print(f"Average price: ${sum(r['Price'] for r in results) / len(results):.2f}")
-        print(f"Cheapest: ${sorted_results[0]['Price']:.2f} in {sorted_results[0]['City']}")
-        print(f"Most expensive: ${sorted_results[-1]['Price']:.2f} in {sorted_results[-1]['City']}")
-        
-        # Best value destinations (under $500)
-        budget_hotels = [r for r in sorted_results if r['Price'] < 500]
-        if budget_hotels:
-            print(f"\n💰 BEST VALUE DESTINATIONS (Under $500):")
-            for r in budget_hotels:
-                print(f"  • {r['City']}: ${r['Price']:.2f} at {r['Hotel']} ({r['Check-in']})")
-        
-        # Generate email report
-        generate_email_report(sorted_results)
-        
+        print(f"\n{'='*60}")
+        print(f"BATCH {batch_start} RESULTS:")
+        print(f"{'='*60}")
+        for r in sorted(results, key=lambda x: x['Price']):
+            print(f"{r['City']}: ${r['Price']:.2f} - {r['Hotel']}")
     else:
         logging.warning("No results found in this batch")
-        print("\n❌ No 10K point hotels found in this batch")
-
-def generate_email_report(results):
-    """Generate an email report of the results"""
-    import json
-    
-    # Create email content
-    email_data = {
-        "to": "tatpsu@gmail.com",
-        "subject": f"AA Hotels 10K Points Report - {datetime.now().strftime('%Y-%m-%d')}",
-        "run_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        "total_cities": len(results),
-        "results": []
-    }
-    
-    # Add top 20 results to email
-    for r in results[:20]:
-        email_data["results"].append({
-            "city": r['City'],
-            "hotel": r['Hotel'],
-            "price": r['Price'],
-            "date": r['Check-in'],
-            "cost_per_point": round(r['Cost per Point'], 4)
-        })
-    
-    # Save email data for GitHub Actions to process
-    with open('email_report.json', 'w') as f:
-        json.dump(email_data, f, indent=2)
-    
-    logging.info(f"Email report saved to email_report.json")
-    
-    # Also create a human-readable email body
-    email_body = f"""
-AA HOTELS 10,000 POINTS DAILY REPORT
-Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')}
-
-🏆 TOP CHEAPEST 10K POINT HOTELS:
-
-"""
-    
-    for i, r in enumerate(results[:10], 1):
-        email_body += f"{i}. {r['City']}\n"
-        email_body += f"   Hotel: {r['Hotel']}\n"
-        email_body += f"   Price: ${r['Price']:.2f} (${r['Cost per Point']:.4f} per point)\n"
-        email_body += f"   Date: {r['Check-in']}\n\n"
-    
-    email_body += f"\n📊 SUMMARY:\n"
-    email_body += f"Total cities with 10K hotels: {len(results)}\n"
-    email_body += f"Average price: ${sum(r['Price'] for r in results) / len(results):.2f}\n"
-    email_body += f"Price range: ${results[0]['Price']:.2f} - ${results[-1]['Price']:.2f}\n"
-    
-    # Best value section
-    budget_hotels = [r for r in results if r['Price'] < 500]
-    if budget_hotels:
-        email_body += f"\n💰 BEST VALUE (Under $500):\n"
-        for r in budget_hotels:
-            email_body += f"• {r['City']}: ${r['Price']:.2f} at {r['Hotel']} ({r['Check-in']})\n"
-    
-    with open('email_body.txt', 'w') as f:
-        f.write(email_body)
-    
-    print(f"\n📧 Email report prepared for tatpsu@gmail.com")
 
 if __name__ == "__main__":
     asyncio.run(main())
