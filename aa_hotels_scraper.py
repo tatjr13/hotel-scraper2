@@ -12,308 +12,344 @@ from pathlib import Path
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-class ProxyManager:
-    def __init__(self, proxy_file='formatted_proxies.txt'):
-        self.proxy_file = proxy_file
-        self.proxies = []
-        self.current_index = 0
-        
-    def load_proxies(self):
-        """Load proxies from file"""
-        try:
-            with open(self.proxy_file, 'r') as f:
-                self.proxies = [line.strip() for line in f if line.strip()]
-            logging.info(f"Loaded {len(self.proxies)} proxies")
-            return True
-        except FileNotFoundError:
-            logging.warning(f"Proxy file {self.proxy_file} not found")
-            return False
-    
-    def get_next_proxy(self):
-        """Get next proxy in rotation"""
-        if not self.proxies:
-            return None
-        proxy = self.proxies[self.current_index % len(self.proxies)]
-        self.current_index += 1
-        return proxy
-    
-    def parse_proxy(self, proxy_url):
-        """Parse proxy URL to Playwright format"""
-        try:
-            # Remove http:// prefix
-            clean_url = proxy_url.replace('http://', '').replace('https://', '')
-            
-            # Split into auth and server parts
-            auth_part, server_part = clean_url.split('@', 1)
-            username, password = auth_part.split(':', 1)
-            
-            return {
-                "server": f"http://{server_part}",
-                "username": username,
-                "password": password
-            }
-        except Exception as e:
-            logging.error(f"Error parsing proxy {proxy_url}: {str(e)}")
-            return None
-
-async def create_browser_with_proxy(playwright, proxy_manager, retry_without_proxy=True):
-    """Create browser with proxy from pool"""
-    proxy_url = proxy_manager.get_next_proxy()
-    
+async def create_browser(playwright, use_proxy=False):
+    """Create browser with or without proxy"""
     browser_args = [
         '--disable-blink-features=AutomationControlled',
         '--disable-features=IsolateOrigins,site-per-process',
         '--disable-dev-shm-usage',
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-images',  # Save bandwidth
-        '--disable-plugins',
-        '--disable-java'
+        '--disable-gpu',
+        '--disable-web-security',
+        '--window-size=1920,1080',
+        '--start-maximized'
     ]
     
-    if proxy_url and retry_without_proxy:
-        proxy_config = proxy_manager.parse_proxy(proxy_url)
-        if proxy_config:
-            logging.info(f"Using proxy #{proxy_manager.current_index}")
-            try:
-                browser = await playwright.chromium.launch(
-                    headless=True,
-                    proxy=proxy_config,
-                    args=browser_args
-                )
-                # Quick test
-                context = await browser.new_context()
-                page = await context.new_page()
-                try:
-                    await page.goto('https://www.aadvantagehotels.com/', timeout=15000)
-                    await page.close()
-                    await context.close()
-                    return browser
-                except Exception as e:
-                    logging.warning(f"Proxy failed test: {str(e)}")
-                    await browser.close()
-                    # Fall through to no-proxy
-            except Exception as e:
-                logging.warning(f"Failed to launch with proxy: {str(e)}")
+    # For GitHub Actions, we can't use proxies due to Cloudflare
+    browser = await playwright.chromium.launch(
+        headless=True,
+        args=browser_args
+    )
     
-    logging.info("Running without proxy (fallback)")
-    browser = await playwright.chromium.launch(headless=True, args=browser_args)
     return browser
 
 async def create_context(browser):
-    """Create browser context with stealth settings"""
+    """Create browser context with anti-detection"""
     context = await browser.new_context(
         viewport={'width': 1920, 'height': 1080},
+        screen={'width': 1920, 'height': 1080},
         user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         locale='en-US',
-        timezone_id='America/New_York'
+        timezone_id='America/New_York',
+        permissions=['geolocation'],
+        geolocation={'latitude': 40.7128, 'longitude': -74.0060},
+        device_scale_factor=1,
+        has_touch=False
     )
     
-    # Add stealth script
+    # Anti-detection script
     await context.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', {
-            get: () => false
+            get: () => undefined
+        });
+        
+        window.chrome = {
+            runtime: {},
+            loadTimes: function() {},
+            csi: function() {},
+            app: {}
+        };
+        
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
+        });
+        
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5]
+        });
+        
+        Object.defineProperty(navigator, 'permissions', {
+            get: () => ['geolocation', 'notifications']
         });
     """)
     
-    # Block unnecessary resources to save bandwidth
+    # Block resources to save bandwidth
     await context.route('**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot}', lambda route: route.abort())
     await context.route('**/analytics/**', lambda route: route.abort())
     await context.route('**/google-analytics.com/**', lambda route: route.abort())
     await context.route('**/googletagmanager.com/**', lambda route: route.abort())
-    await context.route('**/facebook.com/**', lambda route: route.abort())
-    await context.route('**/doubleclick.net/**', lambda route: route.abort())
     
     return context
 
-async def scrape_city(page, city, dates_to_check):
-    """Scrape hotels for a specific city and dates"""
+async def handle_cloudflare(page):
+    """Wait for Cloudflare challenge if present"""
+    try:
+        title = await page.title()
+        if "just a moment" in title.lower():
+            logging.info("Cloudflare challenge detected, waiting...")
+            # Wait up to 20 seconds for challenge to complete
+            for i in range(10):
+                await page.wait_for_timeout(2000)
+                title = await page.title()
+                if "just a moment" not in title.lower() and "aadvantage" in title.lower():
+                    logging.info("Cloudflare challenge passed!")
+                    return True
+            return False
+        return True
+    except:
+        return True
+
+async def scrape_city(context, city, dates_to_check, city_index):
+    """Scrape a city across multiple dates"""
     all_results = []
+    page = await context.new_page()
     
-    for date_index, (checkin_date, checkout_date) in enumerate(dates_to_check):
-        logging.info(f"  Checking {checkin_date} to {checkout_date}")
-        
-        try:
-            # Navigate to homepage for first date only
-            if date_index == 0:
-                await page.goto("https://www.aadvantagehotels.com/", wait_until='domcontentloaded', timeout=30000)
-                await page.wait_for_timeout(random.randint(2000, 3000))
-                
-                # Debug: Save screenshot
-                await page.screenshot(path=f"debug_homepage_{city.replace(',', '_')}.png")
-                
-                # Check for bot detection
-                content = await page.content()
-                page_title = await page.title()
-                logging.info(f"Page title: {page_title}")
-                
-                if "something went wrong" in content.lower() or "access denied" in content.lower():
-                    logging.error("Bot detection or access denied!")
-                    # Save the error page
-                    with open(f"error_page_{city.replace(',', '_')}.html", 'w') as f:
-                        f.write(content)
-                    return []
-                
-                # Wait for and fill city input
-                try:
-                    await page.wait_for_selector('input[placeholder*="city" i], input[placeholder*="City" i]', timeout=10000)
-                    city_input = page.locator('input[placeholder*="city" i], input[placeholder*="City" i]').first
-                    await city_input.click()
-                    await page.wait_for_timeout(random.randint(500, 1000))
-                    await city_input.fill(city)
-                    await page.wait_for_timeout(random.randint(1500, 2000))
-                except Exception as e:
-                    logging.error(f"Failed to find city input: {str(e)}")
-                    # Try alternative selector
-                    try:
-                        city_input = page.locator('input[type="text"]').first
-                        await city_input.click()
-                        await city_input.fill(city)
-                        await page.wait_for_timeout(random.randint(1500, 2000))
-                    except:
-                        raise Exception("Could not find city input field")
-                
-                # Select from dropdown
-                try:
-                    dropdown = page.locator('ul[role="listbox"] li').first
-                    await dropdown.click()
-                except:
-                    await page.keyboard.press('ArrowDown')
-                    await page.wait_for_timeout(300)
-                    await page.keyboard.press('Enter')
-                
-                await page.wait_for_timeout(random.randint(1000, 1500))
+    try:
+        for date_index, (checkin_date, checkout_date) in enumerate(dates_to_check):
+            logging.info(f"Checking {city} for {checkin_date} to {checkout_date}")
             
-            # Fill dates
-            checkin_input = page.locator('input[placeholder*="Check-in" i], input[placeholder*="check-in" i]').first
-            await checkin_input.click()
-            await page.wait_for_timeout(300)
-            await checkin_input.fill(checkin_date)
-            
-            checkout_input = page.locator('input[placeholder*="Check-out" i], input[placeholder*="check-out" i]').first
-            await checkout_input.click()
-            await page.wait_for_timeout(300)
-            await checkout_input.fill(checkout_date)
-            
-            await page.wait_for_timeout(random.randint(500, 1000))
-            
-            # Click search
-            search_button = page.locator('button:has-text("Search")').first
-            await search_button.click()
-            
-            # Wait for search results
             try:
-                await page.wait_for_url("**/search**", timeout=20000)
-            except:
-                if "/search" not in page.url:
-                    logging.warning("Failed to reach search page")
+                # Navigate to homepage
+                await page.goto("https://www.aadvantagehotels.com/", wait_until='domcontentloaded', timeout=60000)
+                await page.wait_for_timeout(3000)
+                
+                # Handle Cloudflare
+                if not await handle_cloudflare(page):
+                    logging.error("Failed to bypass Cloudflare")
                     continue
-            
-            await page.wait_for_timeout(random.randint(3000, 4000))
-            
-            # Sort by highest miles
-            current_url = page.url
-            if "sort=" not in current_url:
-                sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
-                await page.goto(sorted_url, wait_until='domcontentloaded', timeout=20000)
-                await page.wait_for_timeout(random.randint(2000, 3000))
-            
-            # Extract hotels using JavaScript
-            hotels = await page.evaluate('''() => {
-                const results = [];
-                const nameElements = document.querySelectorAll('[data-testid="hotel-name"], [class*="hotel-name"], h3[class*="hotel"], h2[class*="hotel"]');
                 
-                for (let i = 0; i < Math.min(nameElements.length, 20); i++) {
-                    const nameEl = nameElements[i];
-                    const name = nameEl.textContent || '';
+                # Wait for page to be ready
+                await page.wait_for_timeout(2000)
+                
+                # Fill search form
+                try:
+                    # Try multiple selectors for city input
+                    city_selectors = [
+                        'input[placeholder*="city" i]',
+                        'input[placeholder*="destination" i]',
+                        'input[placeholder*="where" i]',
+                        'input[type="text"]:not([placeholder*="date"])'
+                    ]
                     
-                    // Find parent card
-                    let card = nameEl.closest('[data-testid*="hotel-card"], [class*="hotel-card"], article, [class*="property-card"]');
-                    if (!card) {
-                        // Go up the tree
-                        let current = nameEl;
-                        for (let j = 0; j < 5; j++) {
-                            current = current.parentElement;
-                            if (current && current.textContent.includes('$') && current.textContent.includes('miles')) {
-                                card = current;
-                                break;
-                            }
-                        }
-                    }
+                    city_filled = False
+                    for selector in city_selectors:
+                        try:
+                            await page.wait_for_selector(selector, timeout=5000)
+                            city_input = page.locator(selector).first
+                            await city_input.click()
+                            await page.keyboard.press('Control+A')
+                            await page.keyboard.press('Delete')
+                            await city_input.type(city, delay=100)
+                            city_filled = True
+                            break
+                        except:
+                            continue
                     
-                    if (card) {
-                        const cardText = card.textContent || '';
-                        
-                        // Check for 10,000 points
-                        if (cardText.includes('10,000') || cardText.includes('10000')) {
-                            // Extract price
-                            const priceMatch = cardText.match(/\\$(\\d+(?:,\\d+)?(?:\\.\\d{2})?)/);
-                            const price = priceMatch ? parseFloat(priceMatch[1].replace(',', '')) : null;
+                    if not city_filled:
+                        logging.error(f"Could not find city input for {city}")
+                        continue
+                    
+                    await page.wait_for_timeout(2000)
+                    
+                    # Handle dropdown selection
+                    try:
+                        await page.wait_for_selector('ul[role="listbox"] li, .suggestion', timeout=5000)
+                        await page.locator('ul[role="listbox"] li, .suggestion').first.click()
+                    except:
+                        await page.keyboard.press('ArrowDown')
+                        await page.wait_for_timeout(500)
+                        await page.keyboard.press('Enter')
+                    
+                    await page.wait_for_timeout(1000)
+                    
+                    # Fill dates
+                    date_filled = False
+                    date_selectors = [
+                        ('input[placeholder*="check-in" i]', 'input[placeholder*="check-out" i]'),
+                        ('input[placeholder*="Check-in" i]', 'input[placeholder*="Check-out" i]'),
+                        ('input[name*="checkin" i]', 'input[name*="checkout" i]')
+                    ]
+                    
+                    for checkin_sel, checkout_sel in date_selectors:
+                        try:
+                            checkin_input = page.locator(checkin_sel).first
+                            await checkin_input.click()
+                            await checkin_input.fill(checkin_date)
                             
-                            if (name && price) {
-                                results.push({
-                                    name: name.trim(),
-                                    price: price,
-                                    points: 10000
-                                });
+                            checkout_input = page.locator(checkout_sel).first
+                            await checkout_input.click()
+                            await checkout_input.fill(checkout_date)
+                            
+                            date_filled = True
+                            break
+                        except:
+                            continue
+                    
+                    if not date_filled:
+                        logging.error("Could not fill dates")
+                        continue
+                    
+                    await page.wait_for_timeout(1000)
+                    
+                    # Click search
+                    search_clicked = False
+                    search_selectors = [
+                        'button:has-text("Search")',
+                        'button[type="submit"]',
+                        'button[class*="search" i]',
+                        'input[type="submit"]'
+                    ]
+                    
+                    for selector in search_selectors:
+                        try:
+                            search_button = page.locator(selector).first
+                            await search_button.click()
+                            search_clicked = True
+                            break
+                        except:
+                            continue
+                    
+                    if not search_clicked:
+                        logging.error("Could not click search button")
+                        continue
+                    
+                    # Wait for search results
+                    await page.wait_for_load_state('networkidle', timeout=30000)
+                    await page.wait_for_timeout(5000)
+                    
+                    # Verify we're on search page
+                    if "/search" not in page.url:
+                        logging.warning(f"Not on search page. URL: {page.url}")
+                        continue
+                    
+                    # Sort by highest miles
+                    current_url = page.url
+                    if "sort=" not in current_url:
+                        sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
+                        await page.goto(sorted_url, wait_until='networkidle', timeout=30000)
+                        await page.wait_for_timeout(3000)
+                    
+                    # Extract hotels
+                    hotels = await page.evaluate('''() => {
+                        const results = [];
+                        
+                        // Multiple possible selectors
+                        const cardSelectors = [
+                            '[data-testid*="hotel"]',
+                            '[class*="hotel-card"]',
+                            '[class*="property-card"]',
+                            '[class*="HotelCard"]',
+                            '[class*="PropertyCard"]',
+                            'article[class*="hotel"]',
+                            'div[class*="listing"]'
+                        ];
+                        
+                        let cards = [];
+                        for (const selector of cardSelectors) {
+                            cards = document.querySelectorAll(selector);
+                            if (cards.length > 0) break;
+                        }
+                        
+                        // If still no cards, try a more general approach
+                        if (cards.length === 0) {
+                            const allElements = document.querySelectorAll('*');
+                            cards = Array.from(allElements).filter(el => {
+                                const text = el.textContent || '';
+                                return text.includes('miles') && text.includes('$') && 
+                                       (text.includes('10,000') || text.includes('10000'));
+                            }).slice(0, 30);
+                        }
+                        
+                        for (let i = 0; i < Math.min(cards.length, 30); i++) {
+                            const card = cards[i];
+                            const text = card.textContent || '';
+                            
+                            // Check for 10K points
+                            if ((text.includes('10,000') || text.includes('10000')) && 
+                                (text.includes('miles') || text.includes('points'))) {
+                                
+                                // Find hotel name
+                                const nameSelectors = [
+                                    '[data-testid="hotel-name"]',
+                                    '[class*="hotel-name"]',
+                                    '[class*="property-name"]',
+                                    'h3', 'h2', 'h4',
+                                    '[class*="title"]'
+                                ];
+                                
+                                let name = '';
+                                for (const sel of nameSelectors) {
+                                    const nameEl = card.querySelector(sel);
+                                    if (nameEl && nameEl.textContent) {
+                                        name = nameEl.textContent.trim();
+                                        if (name && !name.includes('$') && !name.includes('miles')) {
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                // Extract price
+                                const priceMatch = text.match(/\\$(\\d+(?:,\\d+)?(?:\\.\\d{2})?)/);
+                                const price = priceMatch ? parseFloat(priceMatch[1].replace(',', '')) : null;
+                                
+                                if (name && price) {
+                                    results.push({
+                                        name: name,
+                                        price: price,
+                                        points: 10000
+                                    });
+                                }
                             }
                         }
-                    }
-                }
+                        
+                        return results;
+                    }''')
+                    
+                    # Process results
+                    for hotel in hotels:
+                        all_results.append({
+                            'City': city,
+                            'Hotel': hotel['name'],
+                            'Price': hotel['price'],
+                            'Points': hotel['points'],
+                            'Check-in': checkin_date,
+                            'Check-out': checkout_date,
+                            'Cost per Point': hotel['price'] / hotel['points']
+                        })
+                    
+                    logging.info(f"Found {len(hotels)} hotels with 10K points")
+                    
+                except Exception as e:
+                    logging.error(f"Error scraping {city} for {checkin_date}: {str(e)}")
+                    await page.screenshot(path=f"error_{city.replace(',', '_').replace(' ', '_')}_{date_index}.png")
+                    
+            except Exception as e:
+                logging.error(f"Navigation error for {city}: {str(e)}")
                 
-                return results;
-            }''')
-            
-            # Process results
-            for hotel in hotels:
-                all_results.append({
-                    'City': city,
-                    'Hotel': hotel['name'],
-                    'Price': hotel['price'],
-                    'Points': hotel['points'],
-                    'Check-in': checkin_date,
-                    'Check-out': checkout_date,
-                    'Cost per Point': hotel['price'] / hotel['points']
-                })
-            
-            logging.info(f"    Found {len(hotels)} hotels with 10K points")
-            
-            # Go back for next date (saves bandwidth)
-            if date_index < len(dates_to_check) - 1:
-                await page.go_back()
-                await page.wait_for_timeout(random.randint(1500, 2000))
-                
-        except Exception as e:
-            logging.error(f"    Error: {str(e)}")
+    finally:
+        await page.close()
     
     return all_results
 
-async def main():
-    # Load cities from file
-    cities_file = 'cities_top200.txt'
-    try:
+async def process_batch(start_index, batch_size):
+    """Process a batch of cities"""
+    # Load cities
+    cities_file = os.getenv('CITIES_FILE', 'cities_top200.txt')
+    
+    if os.path.exists(cities_file):
         with open(cities_file, 'r') as f:
-            cities = [line.strip() for line in f if line.strip()]
-        logging.info(f"Loaded {len(cities)} cities from {cities_file}")
-    except FileNotFoundError:
-        logging.error(f"Cities file {cities_file} not found!")
-        # Fallback cities for testing
-        cities = [
-            "Bangkok, Thailand",
-            "Dubai, United Arab Emirates",
-            "London, UK",
-            "Singapore",
-            "Tokyo, Japan"
-        ]
-        logging.info(f"Using {len(cities)} fallback cities")
+            all_cities = [line.strip() for line in f if line.strip()]
+    else:
+        all_cities = ["Bangkok, Thailand", "Istanbul, Turkey", "London, UK", "Dubai, UAE", "Singapore"]
     
-    # Initialize proxy manager
-    proxy_manager = ProxyManager()
-    proxy_manager.load_proxies()
+    # Get batch
+    cities = all_cities[start_index:start_index + batch_size]
+    logging.info(f"Processing batch: {len(cities)} cities starting from index {start_index}")
     
-    # Generate dates to check (3 dates)
+    # Generate dates
     dates_to_check = []
-    for days_ahead in range(1, 4):  # Tomorrow, day after, etc.
+    for days_ahead in [1, 7, 14]:  # Tomorrow, 1 week, 2 weeks
         checkin = datetime.now() + timedelta(days=days_ahead)
         checkout = checkin + timedelta(days=1)
         dates_to_check.append((
@@ -321,76 +357,75 @@ async def main():
             checkout.strftime("%m/%d/%Y")
         ))
     
-    logging.info(f"Will check {len(dates_to_check)} dates for each city")
-    
     all_results = []
     
     async with async_playwright() as p:
-        # Process each city
-        for i, city in enumerate(cities):
-            logging.info(f"\n{'='*60}")
-            logging.info(f"Processing city {i+1}/{len(cities)}: {city}")
-            logging.info(f"{'='*60}")
-            
-            # Create new browser for each city (helps avoid detection)
-            browser = await create_browser_with_proxy(p, proxy_manager)
-            context = await create_context(browser)
-            page = await context.new_page()
-            
-            try:
-                # Scrape the city
-                city_results = await scrape_city(page, city, dates_to_check)
+        browser = await create_browser(p)
+        context = await create_context(browser)
+        
+        try:
+            for i, city in enumerate(cities):
+                logging.info(f"\n{'='*60}")
+                logging.info(f"City {i+1}/{len(cities)}: {city}")
+                logging.info(f"{'='*60}")
+                
+                city_results = await scrape_city(context, city, dates_to_check, i)
                 
                 if city_results:
-                    # Find cheapest 10K hotel for this city
+                    # Find cheapest
                     cheapest = min(city_results, key=lambda x: x['Price'])
                     all_results.append(cheapest)
-                    logging.info(f"✅ Cheapest 10K hotel: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
-                    logging.info(f"   Dates: {cheapest['Check-in']} to {cheapest['Check-out']}")
+                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
                 else:
                     logging.warning(f"❌ No 10K hotels found in {city}")
                 
-            except Exception as e:
-                logging.error(f"Failed to process {city}: {str(e)}")
-                
-            finally:
-                await page.close()
-                await context.close()
-                await browser.close()
-                
                 # Delay between cities
                 if i < len(cities) - 1:
-                    delay = random.uniform(5, 10)
+                    delay = random.uniform(10, 20)
                     logging.info(f"Waiting {delay:.1f}s before next city...")
                     await asyncio.sleep(delay)
+                    
+        finally:
+            await context.close()
+            await browser.close()
+    
+    return all_results
+
+async def main():
+    # Get batch parameters from environment
+    batch_start = int(os.getenv('BATCH_START', 0))
+    batch_size = int(os.getenv('BATCH_SIZE', 10))
+    
+    # Process batch
+    results = await process_batch(batch_start, batch_size)
     
     # Save results
-    if all_results:
-        # Sort by price
-        all_results.sort(key=lambda x: x['Price'])
+    if results:
+        # Save batch results
+        batch_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
+        df = pd.DataFrame(results)
+        df.to_csv(batch_file, index=False)
+        logging.info(f"Saved {len(results)} results to {batch_file}")
         
-        # Save to CSV
-        df = pd.DataFrame(all_results)
-        output_file = "cheapest_10k_hotels.csv"
-        df.to_csv(output_file, index=False)
+        # Also save/update master file
+        master_file = "cheapest_10k_hotels_all.csv"
+        if os.path.exists(master_file):
+            existing_df = pd.read_csv(master_file)
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            # Remove duplicates keeping the latest
+            combined_df = combined_df.drop_duplicates(subset=['City'], keep='last')
+            combined_df.to_csv(master_file, index=False)
+        else:
+            df.to_csv(master_file, index=False)
         
         # Print summary
         print(f"\n{'='*60}")
-        print("SUMMARY - CHEAPEST 10K HOTELS BY CITY")
+        print(f"BATCH {batch_start} RESULTS:")
         print(f"{'='*60}")
-        print(f"Found 10K hotels in {len(all_results)}/{len(cities)} cities\n")
-        
-        for result in all_results:
-            print(f"{result['City']}:")
-            print(f"  Hotel: {result['Hotel']}")
-            print(f"  Price: ${result['Price']:.2f}")
-            print(f"  Cost per point: ${result['Cost per Point']:.4f}")
-            print(f"  Dates: {result['Check-in']} to {result['Check-out']}")
-            print()
-        
-        print(f"✅ Results saved to {output_file}")
+        for r in sorted(results, key=lambda x: x['Price']):
+            print(f"{r['City']}: ${r['Price']:.2f} - {r['Hotel']}")
     else:
-        print("\n❌ No 10K hotels found in any city!")
+        logging.warning("No results found in this batch")
 
 if __name__ == "__main__":
     asyncio.run(main())
