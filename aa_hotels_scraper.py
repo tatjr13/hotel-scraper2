@@ -6,6 +6,7 @@ from playwright.async_api import async_playwright
 import random
 import os
 import re
+from tabulate import tabulate  # Add this for better table display
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -345,7 +346,8 @@ async def process_batch(start_index, batch_size):
                 if city_results:
                     cheapest = min(city_results, key=lambda x: x['Price'])
                     all_results.append(cheapest)
-                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
+                    # Updated to include date in the output
+                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f} for {cheapest['Check-in']} to {cheapest['Check-out']}")
                 else:
                     logging.warning(f"❌ No 10K hotels found in {city}")
                 if i < len(cities) - 1:
@@ -360,12 +362,22 @@ async def process_batch(start_index, batch_size):
 async def main():
     batch_start = int(os.getenv('BATCH_START', 0))
     batch_size = int(os.getenv('BATCH_SIZE', 10))
+    
+    # Print run information
+    print(f"\n{'='*80}")
+    print(f"AAdvantage Hotel Scraper - Starting Run")
+    print(f"Run Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')}")
+    print(f"Batch: {batch_start} to {batch_start + batch_size - 1}")
+    print(f"{'='*80}\n")
+    
     results = await process_batch(batch_start, batch_size)
+    
     if results:
         batch_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
         df = pd.DataFrame(results)
         df.to_csv(batch_file, index=False)
         logging.info(f"Saved {len(results)} results to {batch_file}")
+        
         master_file = "cheapest_10k_hotels_all.csv"
         if os.path.exists(master_file):
             existing_df = pd.read_csv(master_file)
@@ -374,13 +386,69 @@ async def main():
             combined_df.to_csv(master_file, index=False)
         else:
             df.to_csv(master_file, index=False)
-        print(f"\n{'='*60}")
-        print(f"BATCH {batch_start} RESULTS:")
-        print(f"{'='*60}")
-        for r in sorted(results, key=lambda x: x['Price']):
-            print(f"{r['City']}: ${r['Price']:.2f} - {r['Hotel']}")
+        
+        # Enhanced results display
+        print(f"\n{'='*80}")
+        print(f"BATCH {batch_start} COMPLETED - SUMMARY REPORT")
+        print(f"{'='*80}")
+        print(f"Total cities processed: {len(results)}")
+        print(f"Average price for 10K points: ${df['Price'].mean():.2f}")
+        print(f"Best value: ${df['Price'].min():.2f} ({df.loc[df['Price'].idxmin(), 'City']})")
+        print(f"{'='*80}\n")
+        
+        # Sort results by price
+        sorted_results = sorted(results, key=lambda x: x['Price'])
+        
+        # Prepare data for tabular display
+        table_data = []
+        for r in sorted_results:
+            table_data.append([
+                r['City'],
+                r['Hotel'][:40] + '...' if len(r['Hotel']) > 40 else r['Hotel'],
+                f"${r['Price']:.2f}",
+                r['Check-in'],
+                f"${r['Cost per Point']:.4f}"
+            ])
+        
+        # Display results in a nice table
+        headers = ['City', 'Hotel', 'Price', 'Check-in', 'CPP']
+        print(tabulate(table_data, headers=headers, tablefmt='grid'))
+        
+        # Top 5 best deals
+        print(f"\n🏆 TOP 5 BEST DEALS (Lowest Price for 10K Points):")
+        print(f"{'='*80}")
+        for i, r in enumerate(sorted_results[:5], 1):
+            print(f"{i}. {r['City']}")
+            print(f"   Hotel: {r['Hotel']}")
+            print(f"   Price: ${r['Price']:.2f} ({r['Check-in']} to {r['Check-out']})")
+            print(f"   Cost per point: ${r['Cost per Point']:.4f}")
+            print()
+        
+        # Save summary report
+        summary_file = f"batch_{batch_start}_summary.txt"
+        with open(summary_file, 'w') as f:
+            f.write(f"AAdvantage Hotel Scraper - Batch {batch_start} Summary\n")
+            f.write(f"Run completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')}\n")
+            f.write(f"{'='*60}\n\n")
+            f.write(f"Total cities processed: {len(results)}\n")
+            f.write(f"Average price: ${df['Price'].mean():.2f}\n")
+            f.write(f"Best value: ${df['Price'].min():.2f} ({df.loc[df['Price'].idxmin(), 'City']})\n\n")
+            f.write("All results (sorted by price):\n")
+            f.write(f"{'='*60}\n")
+            for r in sorted_results:
+                f.write(f"{r['City']}: ${r['Price']:.2f} - {r['Hotel']} ({r['Check-in']})\n")
+        
+        print(f"\n📄 Summary saved to: {summary_file}")
+        print(f"📊 Full data saved to: {batch_file}")
+        print(f"📁 Master file updated: {master_file}")
+        
     else:
         logging.warning("No results found in this batch")
+        print(f"\n⚠️  No 10,000-point hotels found in batch {batch_start}")
+    
+    print(f"\n{'='*80}")
+    print(f"Run completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')}")
+    print(f"{'='*80}\n")
 
 if __name__ == "__main__":
     asyncio.run(main())
