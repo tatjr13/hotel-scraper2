@@ -193,16 +193,55 @@ async def scrape_city(context, city, dates_to_check, city_index):
                     logging.warning(f"Not on search page. URL: {page.url}")
                     continue
 
-                # Sort by highest miles - FIXED VERSION
-                current_url = page.url
-                if "sort=" not in current_url:
-                    # The correct parameter is "milesHighest" not "miles_desc"
-                    sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
-                    await page.goto(sorted_url, wait_until='networkidle', timeout=30000)
-                    await page.wait_for_timeout(3000)
-                    logging.info("Sorted by highest miles")
-                else:
-                    logging.info("Results already sorted")
+                # Select "Earn miles" radio button
+                try:
+                    earn_miles_radio = page.locator('input[type="radio"][value="earn" i], input[type="radio"][id*="earn" i], label:has-text("Earn miles")')
+                    if await earn_miles_radio.count() > 0:
+                        if not await earn_miles_radio.first.is_checked():
+                            await earn_miles_radio.first.click()
+                            await page.wait_for_timeout(2000)
+                            logging.info("Selected 'Earn miles' option")
+                    else:
+                        # Try clicking the label
+                        earn_label = page.locator('label:has-text("Earn miles")')
+                        if await earn_label.count() > 0:
+                            await earn_label.first.click()
+                            await page.wait_for_timeout(2000)
+                            logging.info("Clicked 'Earn miles' label")
+                except Exception as e:
+                    logging.warning(f"Could not select 'Earn miles' radio: {e}")
+
+                # Click the sort dropdown and select "Most miles earned"
+                try:
+                    # First try to find and click the dropdown
+                    sort_dropdown = page.locator('select:has-text("Featured"), select[name="sort"], button:has-text("Featured"), button:has-text("Sort by")')
+                    if await sort_dropdown.count() > 0:
+                        await sort_dropdown.first.click()
+                        await page.wait_for_timeout(1000)
+                        
+                        # Now select "Most miles earned" option
+                        miles_option = page.locator('option:has-text("Most miles earned"), li:has-text("Most miles earned"), [role="option"]:has-text("Most miles earned")')
+                        if await miles_option.count() > 0:
+                            await miles_option.first.click()
+                            await page.wait_for_timeout(3000)
+                            logging.info("Selected 'Most miles earned' from dropdown")
+                        else:
+                            # If it's a select element, use select_option
+                            await sort_dropdown.first.select_option(label="Most miles earned")
+                            await page.wait_for_timeout(3000)
+                            logging.info("Selected 'Most miles earned' using select_option")
+                except Exception as e:
+                    logging.warning(f"Could not set sort dropdown: {e}")
+                    # Fallback to URL manipulation
+                    current_url = page.url
+                    if "sort=" not in current_url:
+                        sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
+                        await page.goto(sorted_url, wait_until='networkidle', timeout=30000)
+                        await page.wait_for_timeout(3000)
+                        logging.info("Sorted by URL parameter")
+
+                # Take a screenshot for debugging
+                await page.screenshot(path=f"debug_{city.replace(',', '_').replace(' ', '_')}_{date_index}_sorted.png")
 
                 # Extract hotels - FIXED VERSION
                 hotels = await page.evaluate('''() => {
@@ -237,7 +276,109 @@ async def scrape_city(context, city, dates_to_check, city_index):
                                 if (nameEl && nameEl.textContent) {
                                     const tempName = nameEl.textContent.trim();
                                     // Make sure it's actually a hotel name, not other text
-                                    if (tempName && tempName.length > 3 && !tempName.includes('$') && !tempName.includes('miles')) {
+                                    if (tempName && tempName.length > 3 && !tempName.includes('
+
+                # Process results
+                for hotel in hotels:
+                    all_results.append({
+                        'City': city,
+                        'Hotel': hotel['name'],
+                        'Price': hotel['price'],
+                        'Points': hotel['points'],
+                        'Check-in': checkin_date,
+                        'Check-out': checkout_date,
+                        'Cost per Point': hotel['price'] / hotel['points']
+                    })
+                logging.info(f"Found {len(hotels)} hotels with 10K points")
+            except Exception as e:
+                logging.error(f"Error scraping {city} for {checkin_date}: {str(e)}")
+                await page.screenshot(path=f"error_{city.replace(',', '_').replace(' ', '_')}_{date_index}.png")
+    finally:
+        await page.close()
+    return all_results
+
+async def process_batch(start_index, batch_size):
+    """Process a batch of cities"""
+    # Load cities
+    cities_file = os.getenv('CITIES_FILE', 'cities_top200.txt')
+    if os.path.exists(cities_file):
+        with open(cities_file, 'r') as f:
+            all_cities = [line.strip() for line in f if line.strip()]
+    else:
+        all_cities = ["Bangkok, Thailand", "Istanbul, Turkey", "London, UK", "Dubai, UAE", "Singapore"]
+    # Get batch
+    cities = all_cities[start_index:start_index + batch_size]
+    logging.info(f"Processing batch: {len(cities)} cities starting from index {start_index}")
+    # Generate dates - today, tomorrow, day after tomorrow
+    dates_to_check = []
+    for days_ahead in [0, 1, 2]:
+        checkin = datetime.now() + timedelta(days=days_ahead)
+        checkout = checkin + timedelta(days=1)
+        dates_to_check.append((
+            checkin.strftime("%m/%d/%Y"),
+            checkout.strftime("%m/%d/%Y")
+        ))
+    all_results = []
+    async with async_playwright() as p:
+        browser = await create_browser(p)
+        context = await create_context(browser)
+        try:
+            for i, city in enumerate(cities):
+                logging.info(f"\n{'='*60}")
+                logging.info(f"City {i+1}/{len(cities)}: {city}")
+                logging.info(f"{'='*60}")
+                city_results = await scrape_city(context, city, dates_to_check, i)
+                if city_results:
+                    # Find cheapest
+                    cheapest = min(city_results, key=lambda x: x['Price'])
+                    all_results.append(cheapest)
+                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
+                else:
+                    logging.warning(f"❌ No 10K hotels found in {city}")
+                # Delay between cities
+                if i < len(cities) - 1:
+                    delay = random.uniform(10, 20)
+                    logging.info(f"Waiting {delay:.1f}s before next city...")
+                    await asyncio.sleep(delay)
+        finally:
+            await context.close()
+            await browser.close()
+    return all_results
+
+async def main():
+    # Get batch parameters from environment
+    batch_start = int(os.getenv('BATCH_START', 0))
+    batch_size = int(os.getenv('BATCH_SIZE', 10))
+    # Process batch
+    results = await process_batch(batch_start, batch_size)
+    # Save results
+    if results:
+        # Save batch results
+        batch_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
+        df = pd.DataFrame(results)
+        df.to_csv(batch_file, index=False)
+        logging.info(f"Saved {len(results)} results to {batch_file}")
+        # Also save/update master file
+        master_file = "cheapest_10k_hotels_all.csv"
+        if os.path.exists(master_file):
+            existing_df = pd.read_csv(master_file)
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['City'], keep='last')
+            combined_df.to_csv(master_file, index=False)
+        else:
+            df.to_csv(master_file, index=False)
+        # Print summary
+        print(f"\n{'='*60}")
+        print(f"BATCH {batch_start} RESULTS:")
+        print(f"{'='*60}")
+        for r in sorted(results, key=lambda x: x['Price']):
+            print(f"{r['City']}: ${r['Price']:.2f} - {r['Hotel']}")
+    else:
+        logging.warning("No results found in this batch")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+) && !tempName.includes('miles')) {
                                         name = tempName;
                                         break;
                                     }
@@ -247,15 +388,219 @@ async def scrape_city(context, city, dates_to_check, city_index):
                             // Find price - look for dollar amounts
                             let price = null;
                             // Match prices like $389, $1,234, etc.
-                            const priceMatches = text.match(/\\$(\d{1,3}(?:,\d{3})*(?:\\.\\d{2})?)/g);
+                            const priceMatches = text.match(/\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/g);
                             if (priceMatches && priceMatches.length > 0) {
                                 // Usually the last price is the total
                                 const lastPrice = priceMatches[priceMatches.length - 1];
-                                price = parseFloat(lastPrice.replace('$', '').replace(/,/g, ''));
+                                price = parseFloat(lastPrice.replace('
+
+                # Process results
+                for hotel in hotels:
+                    all_results.append({
+                        'City': city,
+                        'Hotel': hotel['name'],
+                        'Price': hotel['price'],
+                        'Points': hotel['points'],
+                        'Check-in': checkin_date,
+                        'Check-out': checkout_date,
+                        'Cost per Point': hotel['price'] / hotel['points']
+                    })
+                logging.info(f"Found {len(hotels)} hotels with 10K points")
+            except Exception as e:
+                logging.error(f"Error scraping {city} for {checkin_date}: {str(e)}")
+                await page.screenshot(path=f"error_{city.replace(',', '_').replace(' ', '_')}_{date_index}.png")
+    finally:
+        await page.close()
+    return all_results
+
+async def process_batch(start_index, batch_size):
+    """Process a batch of cities"""
+    # Load cities
+    cities_file = os.getenv('CITIES_FILE', 'cities_top200.txt')
+    if os.path.exists(cities_file):
+        with open(cities_file, 'r') as f:
+            all_cities = [line.strip() for line in f if line.strip()]
+    else:
+        all_cities = ["Bangkok, Thailand", "Istanbul, Turkey", "London, UK", "Dubai, UAE", "Singapore"]
+    # Get batch
+    cities = all_cities[start_index:start_index + batch_size]
+    logging.info(f"Processing batch: {len(cities)} cities starting from index {start_index}")
+    # Generate dates - today, tomorrow, day after tomorrow
+    dates_to_check = []
+    for days_ahead in [0, 1, 2]:
+        checkin = datetime.now() + timedelta(days=days_ahead)
+        checkout = checkin + timedelta(days=1)
+        dates_to_check.append((
+            checkin.strftime("%m/%d/%Y"),
+            checkout.strftime("%m/%d/%Y")
+        ))
+    all_results = []
+    async with async_playwright() as p:
+        browser = await create_browser(p)
+        context = await create_context(browser)
+        try:
+            for i, city in enumerate(cities):
+                logging.info(f"\n{'='*60}")
+                logging.info(f"City {i+1}/{len(cities)}: {city}")
+                logging.info(f"{'='*60}")
+                city_results = await scrape_city(context, city, dates_to_check, i)
+                if city_results:
+                    # Find cheapest
+                    cheapest = min(city_results, key=lambda x: x['Price'])
+                    all_results.append(cheapest)
+                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
+                else:
+                    logging.warning(f"❌ No 10K hotels found in {city}")
+                # Delay between cities
+                if i < len(cities) - 1:
+                    delay = random.uniform(10, 20)
+                    logging.info(f"Waiting {delay:.1f}s before next city...")
+                    await asyncio.sleep(delay)
+        finally:
+            await context.close()
+            await browser.close()
+    return all_results
+
+async def main():
+    # Get batch parameters from environment
+    batch_start = int(os.getenv('BATCH_START', 0))
+    batch_size = int(os.getenv('BATCH_SIZE', 10))
+    # Process batch
+    results = await process_batch(batch_start, batch_size)
+    # Save results
+    if results:
+        # Save batch results
+        batch_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
+        df = pd.DataFrame(results)
+        df.to_csv(batch_file, index=False)
+        logging.info(f"Saved {len(results)} results to {batch_file}")
+        # Also save/update master file
+        master_file = "cheapest_10k_hotels_all.csv"
+        if os.path.exists(master_file):
+            existing_df = pd.read_csv(master_file)
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['City'], keep='last')
+            combined_df.to_csv(master_file, index=False)
+        else:
+            df.to_csv(master_file, index=False)
+        # Print summary
+        print(f"\n{'='*60}")
+        print(f"BATCH {batch_start} RESULTS:")
+        print(f"{'='*60}")
+        for r in sorted(results, key=lambda x: x['Price']):
+            print(f"{r['City']}: ${r['Price']:.2f} - {r['Hotel']}")
+    else:
+        logging.warning("No results found in this batch")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+, '').replace(/,/g, ''));
                             }
                             
                             if (name && price) {
-                                console.log('Found 10K hotel: ' + name + ' at $' + price);
+                                console.log('Found 10K hotel: ' + name + ' at 
+
+                # Process results
+                for hotel in hotels:
+                    all_results.append({
+                        'City': city,
+                        'Hotel': hotel['name'],
+                        'Price': hotel['price'],
+                        'Points': hotel['points'],
+                        'Check-in': checkin_date,
+                        'Check-out': checkout_date,
+                        'Cost per Point': hotel['price'] / hotel['points']
+                    })
+                logging.info(f"Found {len(hotels)} hotels with 10K points")
+            except Exception as e:
+                logging.error(f"Error scraping {city} for {checkin_date}: {str(e)}")
+                await page.screenshot(path=f"error_{city.replace(',', '_').replace(' ', '_')}_{date_index}.png")
+    finally:
+        await page.close()
+    return all_results
+
+async def process_batch(start_index, batch_size):
+    """Process a batch of cities"""
+    # Load cities
+    cities_file = os.getenv('CITIES_FILE', 'cities_top200.txt')
+    if os.path.exists(cities_file):
+        with open(cities_file, 'r') as f:
+            all_cities = [line.strip() for line in f if line.strip()]
+    else:
+        all_cities = ["Bangkok, Thailand", "Istanbul, Turkey", "London, UK", "Dubai, UAE", "Singapore"]
+    # Get batch
+    cities = all_cities[start_index:start_index + batch_size]
+    logging.info(f"Processing batch: {len(cities)} cities starting from index {start_index}")
+    # Generate dates - today, tomorrow, day after tomorrow
+    dates_to_check = []
+    for days_ahead in [0, 1, 2]:
+        checkin = datetime.now() + timedelta(days=days_ahead)
+        checkout = checkin + timedelta(days=1)
+        dates_to_check.append((
+            checkin.strftime("%m/%d/%Y"),
+            checkout.strftime("%m/%d/%Y")
+        ))
+    all_results = []
+    async with async_playwright() as p:
+        browser = await create_browser(p)
+        context = await create_context(browser)
+        try:
+            for i, city in enumerate(cities):
+                logging.info(f"\n{'='*60}")
+                logging.info(f"City {i+1}/{len(cities)}: {city}")
+                logging.info(f"{'='*60}")
+                city_results = await scrape_city(context, city, dates_to_check, i)
+                if city_results:
+                    # Find cheapest
+                    cheapest = min(city_results, key=lambda x: x['Price'])
+                    all_results.append(cheapest)
+                    logging.info(f"✅ Cheapest: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
+                else:
+                    logging.warning(f"❌ No 10K hotels found in {city}")
+                # Delay between cities
+                if i < len(cities) - 1:
+                    delay = random.uniform(10, 20)
+                    logging.info(f"Waiting {delay:.1f}s before next city...")
+                    await asyncio.sleep(delay)
+        finally:
+            await context.close()
+            await browser.close()
+    return all_results
+
+async def main():
+    # Get batch parameters from environment
+    batch_start = int(os.getenv('BATCH_START', 0))
+    batch_size = int(os.getenv('BATCH_SIZE', 10))
+    # Process batch
+    results = await process_batch(batch_start, batch_size)
+    # Save results
+    if results:
+        # Save batch results
+        batch_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
+        df = pd.DataFrame(results)
+        df.to_csv(batch_file, index=False)
+        logging.info(f"Saved {len(results)} results to {batch_file}")
+        # Also save/update master file
+        master_file = "cheapest_10k_hotels_all.csv"
+        if os.path.exists(master_file):
+            existing_df = pd.read_csv(master_file)
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['City'], keep='last')
+            combined_df.to_csv(master_file, index=False)
+        else:
+            df.to_csv(master_file, index=False)
+        # Print summary
+        print(f"\n{'='*60}")
+        print(f"BATCH {batch_start} RESULTS:")
+        print(f"{'='*60}")
+        for r in sorted(results, key=lambda x: x['Price']):
+            print(f"{r['City']}: ${r['Price']:.2f} - {r['Hotel']}")
+    else:
+        logging.warning("No results found in this batch")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+ + price);
                                 results.push({
                                     name: name,
                                     price: price,
