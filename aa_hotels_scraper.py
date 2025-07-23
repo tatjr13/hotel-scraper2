@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import random
 import os
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,10 +22,7 @@ async def create_browser(playwright):
         '--window-size=1920,1080',
         '--start-maximized'
     ]
-    browser = await playwright.chromium.launch(
-        headless=True,
-        args=browser_args
-    )
+    browser = await playwright.chromium.launch(headless=True, args=browser_args)
     return browser
 
 async def create_context(browser):
@@ -65,7 +63,7 @@ async def handle_cloudflare(page):
                     return True
             return False
         return True
-    except:
+    except Exception:
         return True
 
 async def scrape_city(context, city, dates_to_check, city_index):
@@ -100,7 +98,7 @@ async def scrape_city(context, city, dates_to_check, city_index):
                         await city_input.type(city, delay=100)
                         city_filled = True
                         break
-                    except:
+                    except Exception:
                         continue
                 if not city_filled:
                     logging.error(f"Could not find city input for {city}")
@@ -111,7 +109,7 @@ async def scrape_city(context, city, dates_to_check, city_index):
                 try:
                     await page.wait_for_selector('ul[role="listbox"] li, .suggestion', timeout=5000)
                     await page.locator('ul[role="listbox"] li, .suggestion').first.click()
-                except:
+                except Exception:
                     await page.keyboard.press('ArrowDown')
                     await page.wait_for_timeout(500)
                     await page.keyboard.press('Enter')
@@ -134,7 +132,7 @@ async def scrape_city(context, city, dates_to_check, city_index):
                         await checkout_input.fill(checkout_date)
                         date_filled = True
                         break
-                    except:
+                    except Exception:
                         continue
                 if not date_filled:
                     logging.error("Could not fill dates")
@@ -155,7 +153,7 @@ async def scrape_city(context, city, dates_to_check, city_index):
                         await search_button.click()
                         search_clicked = True
                         break
-                    except:
+                    except Exception:
                         continue
                 if not search_clicked:
                     logging.error("Could not click search button")
@@ -163,14 +161,19 @@ async def scrape_city(context, city, dates_to_check, city_index):
                 await page.wait_for_load_state('networkidle', timeout=30000)
                 await page.wait_for_timeout(5000)
 
-                # -- FIX: Always select "Earn miles" and sort after EACH search --
+                # Verify we're on search page
+                if "/search" not in page.url:
+                    logging.warning(f"Not on search page. URL: {page.url}")
+                    continue
+
+                # Select "Earn miles" - always click it
                 try:
-                    earn_miles_radio = page.locator('input[type="radio"][value="earn" i], input[type="radio"][id*="earn" i], label:has-text("Earn miles")')
+                    earn_miles_radio = page.locator('input[type="radio"][value="earn" i], input[type="radio"][id*="earn" i]')
                     if await earn_miles_radio.count() > 0:
-                        if not await earn_miles_radio.first.is_checked():
-                            await earn_miles_radio.first.click()
-                            await page.wait_for_timeout(2000)
-                            logging.info("Selected 'Earn miles' option")
+                        # Always click it, don't check if it's already selected
+                        await earn_miles_radio.first.click()
+                        await page.wait_for_timeout(2000)
+                        logging.info("Clicked 'Earn miles' radio option")
                     else:
                         earn_label = page.locator('label:has-text("Earn miles")')
                         if await earn_label.count() > 0:
@@ -180,52 +183,96 @@ async def scrape_city(context, city, dates_to_check, city_index):
                 except Exception as e:
                     logging.warning(f"Could not select 'Earn miles' radio: {e}")
 
+                # Sort by most miles - with better fallback
+                sorted_successfully = False
                 try:
-                    sort_dropdown = page.locator('select[name="sort"], select[aria-label*="sort" i]')
+                    sort_dropdown = page.locator('select[name="sort"], select[aria-label*="sort" i]').first
                     if await sort_dropdown.count() > 0:
-                        await sort_dropdown.select_option(label="Most miles earned")
-                        await page.wait_for_timeout(2000)
+                        # Force the dropdown to update
+                        await sort_dropdown.click()
+                        await page.wait_for_timeout(500)
+                        await sort_dropdown.select_option(value="milesHighest")
+                        await page.wait_for_timeout(3000)
                         logging.info("Selected 'Most miles earned' from dropdown")
+                        sorted_successfully = True
                 except Exception as e:
                     logging.warning(f"Could not set sort dropdown: {e}")
 
+                # If dropdown didn't work, try URL parameter
+                if not sorted_successfully:
+                    try:
+                        current_url = page.url
+                        if "sort=milesHighest" not in current_url:
+                            # Remove any existing sort parameter
+                            cleaned_url = re.sub(r'[?&]sort=[^&]*', '', current_url)
+                            # Add proper separator
+                            separator = '&' if '?' in cleaned_url else '?'
+                            sorted_url = f"{cleaned_url}{separator}sort=milesHighest"
+                            await page.goto(sorted_url, wait_until='networkidle', timeout=30000)
+                            await page.wait_for_timeout(3000)
+                            logging.info("Sorted by URL parameter")
+                    except Exception as e:
+                        logging.error(f"Failed to sort via URL: {e}")
+
+                # Take screenshot to verify sort worked
                 await page.screenshot(path=f"debug_{city.replace(',', '_').replace(' ', '_')}_{date_index}_sorted.png")
 
-                # Extract hotels
+                # Extract hotels with improved price extraction
                 hotels = await page.evaluate('''() => {
                     const results = [];
                     const cards = document.querySelectorAll('[data-testid*="hotel"], [class*="hotel-card"], article, div[class*="property"]');
+                    
                     for (let i = 0; i < Math.min(cards.length, 30); i++) {
                         const card = cards[i];
                         const text = card.textContent || '';
+                        
                         if ((text.includes('Earn 10,000 miles') || text.includes('Earn 10000 miles')) &&
                             !text.includes('Earn 1,000 miles') && !text.includes('Earn 1000 miles')) {
+                            
                             let name = '';
                             const nameSelectors = [
                                 '[data-testid="hotel-name"]',
                                 'h3',
-                                'h2',
+                                'h2', 
                                 '[class*="hotel-name"]',
                                 '[class*="property-name"]',
                                 'a[href*="/hotel/"]'
                             ];
+                            
                             for (const sel of nameSelectors) {
                                 const nameEl = card.querySelector(sel);
                                 if (nameEl && nameEl.textContent) {
                                     const tempName = nameEl.textContent.trim();
-                                    if (tempName && tempName.length > 3) {
+                                    if (tempName && tempName.length > 3 && !tempName.includes('$')) {
                                         name = tempName;
                                         break;
                                     }
                                 }
                             }
+                            
+                            // Improved price extraction
                             let price = null;
-                            const priceMatches = text.match(/\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/g);
-                            if (priceMatches && priceMatches.length > 0) {
-                                const lastPrice = priceMatches[priceMatches.length - 1];
-                                price = parseFloat(lastPrice.replace(/[\$,]/g, ''));
+                            // Look for price patterns like "$322" or "322 USD" or "Total (1 night) $322"
+                            const pricePatterns = [
+                                /Total[^$]*\\$(\d{1,4}(?:,\d{3})*(?:\\.\\d{2})?)/i,
+                                /\\$(\d{1,4}(?:,\d{3})*(?:\\.\\d{2})?)\\s*(?:Total|per|\\/)/i,
+                                /\\$(\d{1,4}(?:,\d{3})*(?:\\.\\d{2})?)/
+                            ];
+                            
+                            for (const pattern of pricePatterns) {
+                                const match = text.match(pattern);
+                                if (match) {
+                                    const extractedPrice = parseFloat(match[1].replace(/,/g, ''));
+                                    // Sanity check - hotel prices should be between $20 and $5000
+                                    if (extractedPrice >= 20 && extractedPrice <= 5000) {
+                                        price = extractedPrice;
+                                        break;
+                                    }
+                                }
                             }
+                            
                             if (name && price) {
+                                console.log('Found 10K hotel:', name, 'at $', price);
                                 results.push({
                                     name: name,
                                     price: price,
@@ -234,6 +281,7 @@ async def scrape_city(context, city, dates_to_check, city_index):
                             }
                         }
                     }
+                    
                     return results;
                 }''')
 
