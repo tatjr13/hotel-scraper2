@@ -330,7 +330,13 @@ async def scrape_city(context, city, dates_to_check, city_index):
                         'Check-out': checkout_date,
                         'Cost per Point': hotel['price'] / hotel['points']
                     })
-                logging.info(f"Found {len(hotels)} hotels with 10K points")
+                
+                # Log found hotels with prices
+                if hotels:
+                    price_list = [f"${h['price']:.2f}" for h in hotels]
+                    logging.info(f"Found {len(hotels)} hotels with 10K points: {', '.join(price_list)}")
+                else:
+                    logging.info("Found 0 hotels with 10K points")
             except Exception as e:
                 logging.error(f"Error scraping {city} for {checkin_date}: {str(e)}")
                 await page.screenshot(path=f"error_{city.replace(',', '_').replace(' ', '_')}_{date_index}.png")
