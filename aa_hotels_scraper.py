@@ -166,20 +166,27 @@ async def scrape_city(context, city, dates_to_check, city_index):
                     logging.warning(f"Not on search page. URL: {page.url}")
                     continue
 
-                # Select "Earn miles" - always click it
+                # Select "Earn miles" - handle overlay blocking issue
                 try:
                     earn_miles_radio = page.locator('input[type="radio"][value="earn" i], input[type="radio"][id*="earn" i]')
                     if await earn_miles_radio.count() > 0:
-                        # Always click it, don't check if it's already selected
-                        await earn_miles_radio.first.click()
-                        await page.wait_for_timeout(2000)
-                        logging.info("Clicked 'Earn miles' radio option")
-                    else:
-                        earn_label = page.locator('label:has-text("Earn miles")')
-                        if await earn_label.count() > 0:
-                            await earn_label.first.click()
-                            await page.wait_for_timeout(2000)
-                            logging.info("Clicked 'Earn miles' label")
+                        # Check if it's already selected
+                        is_checked = await earn_miles_radio.first.is_checked()
+                        if not is_checked:
+                            # Try to click the radio button
+                            try:
+                                await earn_miles_radio.first.click()
+                                await page.wait_for_timeout(2000)
+                                logging.info("Clicked 'Earn miles' radio option")
+                            except:
+                                # If direct click fails, try the label
+                                earn_label = page.locator('label:has-text("Earn miles")')
+                                if await earn_label.count() > 0:
+                                    await earn_label.first.click()
+                                    await page.wait_for_timeout(2000)
+                                    logging.info("Clicked 'Earn miles' label instead")
+                        else:
+                            logging.info("'Earn miles' already selected")
                 except Exception as e:
                     logging.warning(f"Could not select 'Earn miles' radio: {e}")
 
@@ -188,12 +195,17 @@ async def scrape_city(context, city, dates_to_check, city_index):
                 try:
                     sort_dropdown = page.locator('select[name="sort"], select[aria-label*="sort" i]').first
                     if await sort_dropdown.count() > 0:
-                        # Force the dropdown to update
-                        await sort_dropdown.click()
-                        await page.wait_for_timeout(500)
-                        await sort_dropdown.select_option(value="milesHighest")
-                        await page.wait_for_timeout(3000)
-                        logging.info("Selected 'Most miles earned' from dropdown")
+                        # Get current value
+                        current_value = await sort_dropdown.input_value()
+                        if current_value != "milesHighest":
+                            # Force the dropdown to update
+                            await sort_dropdown.click()
+                            await page.wait_for_timeout(500)
+                            await sort_dropdown.select_option(value="milesHighest")
+                            await page.wait_for_timeout(3000)
+                            logging.info("Selected 'Most miles earned' from dropdown")
+                        else:
+                            logging.info("Already sorted by 'Most miles earned'")
                         sorted_successfully = True
                 except Exception as e:
                     logging.warning(f"Could not set sort dropdown: {e}")
