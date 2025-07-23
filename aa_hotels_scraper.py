@@ -16,51 +16,35 @@ class ProxyManager:
     def __init__(self, proxy_file='formatted_proxies.txt'):
         self.proxy_file = proxy_file
         self.proxies = []
-        self.working_proxies = []
         self.current_index = 0
-        self.lock = asyncio.Lock()
-        self.failed_proxies = set()
         
-    async def initialize(self, use_proxies=True):
-        if not use_proxies:
-            logging.info("Running without proxies")
-            return
-            
-        logging.info(f"Attempting to load proxies from {self.proxy_file}...")
-        
+    def load_proxies(self):
+        """Load proxies from file"""
         try:
             with open(self.proxy_file, 'r') as f:
                 self.proxies = [line.strip() for line in f if line.strip()]
-            
-            if not self.proxies:
-                logging.warning("No proxies found in file")
-                return
-                
-            logging.info(f"Successfully loaded {len(self.proxies)} proxies.")
-            
-            # For WebShare proxies, use a subset for rotation
-            # Take every Nth proxy to get diversity across different subnets
-            step = max(1, len(self.proxies) // 1000)  # Get ~1000 diverse proxies
-            self.working_proxies = self.proxies[::step][:1000]
-            
-            logging.info(f"Selected {len(self.working_proxies)} diverse proxies for rotation")
-                
+            logging.info(f"Loaded {len(self.proxies)} proxies")
+            return True
         except FileNotFoundError:
-            logging.error(f"Proxy file {self.proxy_file} not found")
-        except Exception as e:
-            logging.error(f"Error loading proxies: {str(e)}")
+            logging.warning(f"Proxy file {self.proxy_file} not found")
+            return False
     
-    def parse_proxy_url(self, proxy_url):
-        """Convert proxy URL to Playwright proxy configuration"""
-        if not proxy_url:
+    def get_next_proxy(self):
+        """Get next proxy in rotation"""
+        if not self.proxies:
             return None
-            
+        proxy = self.proxies[self.current_index % len(self.proxies)]
+        self.current_index += 1
+        return proxy
+    
+    def parse_proxy(self, proxy_url):
+        """Parse proxy URL to Playwright format"""
         try:
             # Remove http:// prefix
-            url_without_protocol = proxy_url.replace('http://', '').replace('https://', '')
+            clean_url = proxy_url.replace('http://', '').replace('https://', '')
             
-            # Split auth and server parts
-            auth_part, server_part = url_without_protocol.split('@', 1)
+            # Split into auth and server parts
+            auth_part, server_part = clean_url.split('@', 1)
             username, password = auth_part.split(':', 1)
             
             return {
@@ -68,366 +52,236 @@ class ProxyManager:
                 "username": username,
                 "password": password
             }
-                
         except Exception as e:
             logging.error(f"Error parsing proxy {proxy_url}: {str(e)}")
             return None
-    
-    async def get_proxy(self):
-        """Get next working proxy with rotation"""
-        async with self.lock:
-            if not self.working_proxies:
-                return None
-            
-            # Skip failed proxies
-            attempts = 0
-            while attempts < len(self.working_proxies):
-                proxy = self.working_proxies[self.current_index % len(self.working_proxies)]
-                self.current_index += 1
-                attempts += 1
-                
-                if proxy not in self.failed_proxies:
-                    return proxy
-            
-            # If all proxies have failed, reset the failed set and try again
-            logging.warning("All proxies have failed, resetting failed proxy list")
-            self.failed_proxies.clear()
-            return self.working_proxies[0] if self.working_proxies else None
-    
-    async def mark_proxy_failed(self, proxy):
-        """Mark a proxy as failed"""
-        async with self.lock:
-            self.failed_proxies.add(proxy)
-            logging.info(f"Marked proxy as failed. {len(self.failed_proxies)} failed out of {len(self.working_proxies)} total.")
 
-async def create_browser_context(playwright, proxy_manager, use_proxy=True):
-    """Create a browser context with or without proxy"""
-    browser = None
+async def create_browser_with_proxy(playwright, proxy_manager):
+    """Create browser with proxy from pool"""
+    proxy_url = proxy_manager.get_next_proxy()
     
-    try:
-        if use_proxy and proxy_manager.working_proxies:
-            # Try up to 5 different proxies
-            for attempt in range(5):
-                proxy_url = await proxy_manager.get_proxy()
-                if not proxy_url:
-                    break
-                    
-                proxy_config = proxy_manager.parse_proxy_url(proxy_url)
-                if not proxy_config:
-                    continue
-                
-                try:
-                    # Launch browser with proxy
-                    browser = await playwright.chromium.launch(
-                        headless=True,
-                        proxy=proxy_config,
-                        args=[
-                            '--disable-blink-features=AutomationControlled',
-                            '--disable-features=IsolateOrigins,site-per-process',
-                            '--disable-web-security',
-                            '--disable-setuid-sandbox',
-                            '--no-sandbox'
-                        ]
-                    )
-                    
-                    # Create context with additional stealth settings
-                    context = await browser.new_context(
-                        viewport={'width': 1920, 'height': 1080},
-                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                        locale='en-US',
-                        timezone_id='America/New_York'
-                    )
-                    
-                    # Test the proxy with a simple request
-                    page = await context.new_page()
-                    try:
-                        await page.goto('https://httpbin.org/ip', timeout=15000)
-                        content = await page.content()
-                        if '"origin"' in content:
-                            ip = re.search(r'"origin":\s*"([^"]+)"', content)
-                            if ip:
-                                logging.info(f"Proxy working! IP: {ip.group(1)}")
-                            await page.close()
-                            return browser, context
-                    except Exception as e:
-                        await page.close()
-                        await context.close()
-                        await browser.close()
-                        await proxy_manager.mark_proxy_failed(proxy_url)
-                        logging.warning(f"Proxy test failed (attempt {attempt + 1}/5): {str(e)}")
-                        continue
-                        
-                except Exception as e:
-                    if browser:
-                        await browser.close()
-                    await proxy_manager.mark_proxy_failed(proxy_url)
-                    logging.warning(f"Browser launch failed with proxy (attempt {attempt + 1}/5): {str(e)}")
-        
-        # If no proxy or all proxies failed, launch without proxy
-        logging.info("Launching browser without proxy")
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=IsolateOrigins,site-per-process'
-            ]
-        )
-        
-        context = await browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            locale='en-US',
-            timezone_id='America/New_York'
-        )
-        
-        return browser, context
-        
-    except Exception as e:
-        logging.error(f"Failed to create browser: {str(e)}")
-        if browser:
-            await browser.close()
-        raise
+    browser_args = [
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-dev-shm-usage',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-images',  # Save bandwidth
+        '--disable-plugins',
+        '--disable-java'
+    ]
+    
+    if proxy_url:
+        proxy_config = proxy_manager.parse_proxy(proxy_url)
+        if proxy_config:
+            logging.info(f"Using proxy #{proxy_manager.current_index}")
+            browser = await playwright.chromium.launch(
+                headless=True,
+                proxy=proxy_config,
+                args=browser_args
+            )
+        else:
+            logging.warning("Failed to parse proxy, running without proxy")
+            browser = await playwright.chromium.launch(headless=True, args=browser_args)
+    else:
+        logging.info("No proxy available, running without proxy")
+        browser = await playwright.chromium.launch(headless=True, args=browser_args)
+    
+    return browser
 
-async def scrape_city_with_retry(city, dates_to_check, proxy_manager, max_retries=3):
-    """Scrape a city with retry logic and proxy rotation"""
+async def create_context(browser):
+    """Create browser context with stealth settings"""
+    context = await browser.new_context(
+        viewport={'width': 1920, 'height': 1080},
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        locale='en-US',
+        timezone_id='America/New_York'
+    )
     
-    for retry in range(max_retries):
-        try:
-            async with async_playwright() as p:
-                browser, context = await create_browser_context(p, proxy_manager, use_proxy=True)
-                
-                try:
-                    # Scrape with current browser/proxy
-                    result = await scrape_city(browser, context, city, dates_to_check)
-                    return result
-                    
-                except Exception as e:
-                    logging.error(f"Scraping failed for {city} (attempt {retry + 1}/{max_retries}): {str(e)}")
-                    
-                    # Check if it's an error page
-                    if "something went wrong" in str(e).lower():
-                        logging.warning("Detected 'something went wrong' error - likely bot detection")
-                    
-                finally:
-                    await context.close()
-                    await browser.close()
-                    
-        except Exception as e:
-            logging.error(f"Browser creation failed (attempt {retry + 1}/{max_retries}): {str(e)}")
-        
-        # Wait before retry
-        await asyncio.sleep(random.uniform(5, 10))
+    # Add stealth script
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => false
+        });
+    """)
     
-    return None
+    # Block unnecessary resources to save bandwidth
+    await context.route('**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot}', lambda route: route.abort())
+    await context.route('**/analytics/**', lambda route: route.abort())
+    await context.route('**/google-analytics.com/**', lambda route: route.abort())
+    await context.route('**/googletagmanager.com/**', lambda route: route.abort())
+    await context.route('**/facebook.com/**', lambda route: route.abort())
+    await context.route('**/doubleclick.net/**', lambda route: route.abort())
+    
+    return context
 
-async def scrape_city(browser, context, city, dates_to_check):
-    """Scrape hotels for a specific city"""
+async def scrape_city(page, city, dates_to_check):
+    """Scrape hotels for a specific city and dates"""
     all_results = []
     
-    for checkin_date, checkout_date in dates_to_check:
-        logging.info(f"Checking {city} for {checkin_date} to {checkout_date}")
+    for date_index, (checkin_date, checkout_date) in enumerate(dates_to_check):
+        logging.info(f"  Checking {checkin_date} to {checkout_date}")
         
-        page = None
         try:
-            page = await context.new_page()
-            
-            # Add stealth scripts
-            await page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false
-                });
-            """)
-            
-            # Navigate to the website
-            await page.goto("https://www.aadvantagehotels.com/", wait_until='networkidle', timeout=30000)
-            await asyncio.sleep(random.uniform(2, 4))
-            
-            # Check for error page
-            content = await page.content()
-            if "something went wrong" in content.lower() or "error" in await page.title():
-                raise Exception("Error page detected - possible bot detection")
-            
-            # Fill in search form
-            # City input
-            city_input = await page.wait_for_selector('input[placeholder="Enter a city, airport, or landmark"]', timeout=15000)
-            await city_input.click()
-            await asyncio.sleep(random.uniform(0.5, 1))
-            
-            # Type slowly to appear more human
-            for char in city:
-                await city_input.type(char, delay=random.randint(50, 150))
-            await asyncio.sleep(random.uniform(1, 2))
-            
-            # Select from dropdown
-            try:
-                await page.wait_for_selector('ul[role="listbox"] li', timeout=5000)
-                dropdown_options = await page.query_selector_all('ul[role="listbox"] li')
-                if dropdown_options:
-                    await dropdown_options[0].click()
-                else:
+            # Navigate to homepage for first date only
+            if date_index == 0:
+                await page.goto("https://www.aadvantagehotels.com/", wait_until='domcontentloaded', timeout=30000)
+                await page.wait_for_timeout(random.randint(2000, 3000))
+                
+                # Check for bot detection
+                content = await page.content()
+                if "something went wrong" in content.lower():
+                    logging.error("Bot detection triggered!")
+                    return []
+                
+                # Fill city
+                city_input = page.locator('input[placeholder*="city" i], input[placeholder*="City" i]').first
+                await city_input.click()
+                await page.wait_for_timeout(random.randint(500, 1000))
+                await city_input.fill(city)
+                await page.wait_for_timeout(random.randint(1500, 2000))
+                
+                # Select from dropdown
+                try:
+                    dropdown = page.locator('ul[role="listbox"] li').first
+                    await dropdown.click()
+                except:
                     await page.keyboard.press('ArrowDown')
-                    await asyncio.sleep(0.5)
+                    await page.wait_for_timeout(300)
                     await page.keyboard.press('Enter')
-            except:
-                await page.keyboard.press('ArrowDown')
-                await asyncio.sleep(0.5)
-                await page.keyboard.press('Enter')
-            
-            await asyncio.sleep(random.uniform(1, 2))
+                
+                await page.wait_for_timeout(random.randint(1000, 1500))
             
             # Fill dates
-            checkin_input = await page.wait_for_selector('input[placeholder="Check-in"]', timeout=10000)
+            checkin_input = page.locator('input[placeholder*="Check-in" i], input[placeholder*="check-in" i]').first
             await checkin_input.click()
-            await checkin_input.fill(checkin_date, force=True)
-            await asyncio.sleep(random.uniform(0.5, 1))
+            await page.wait_for_timeout(300)
+            await checkin_input.fill(checkin_date)
             
-            checkout_input = await page.wait_for_selector('input[placeholder="Check-out"]', timeout=10000)
+            checkout_input = page.locator('input[placeholder*="Check-out" i], input[placeholder*="check-out" i]').first
             await checkout_input.click()
-            await checkout_input.fill(checkout_date, force=True)
-            await asyncio.sleep(random.uniform(0.5, 1))
+            await page.wait_for_timeout(300)
+            await checkout_input.fill(checkout_date)
+            
+            await page.wait_for_timeout(random.randint(500, 1000))
             
             # Click search
-            search_button = await page.get_by_role("button", name="Search")
+            search_button = page.locator('button:has-text("Search")').first
             await search_button.click()
             
-            # Wait for navigation
+            # Wait for search results
             try:
-                await page.wait_for_url("**/search**", timeout=30000)
+                await page.wait_for_url("**/search**", timeout=20000)
             except:
-                current_url = page.url
-                if "/search" not in current_url:
-                    logging.warning(f"Failed to navigate to search results. Current URL: {current_url}")
+                if "/search" not in page.url:
+                    logging.warning("Failed to reach search page")
                     continue
             
-            await asyncio.sleep(random.uniform(3, 5))
-            
-            # Check for error on results page
-            content = await page.content()
-            if "something went wrong" in content.lower():
-                raise Exception("Error page on search results")
+            await page.wait_for_timeout(random.randint(3000, 4000))
             
             # Sort by highest miles
             current_url = page.url
             if "sort=" not in current_url:
                 sorted_url = current_url + ("&sort=milesHighest" if "?" in current_url else "?sort=milesHighest")
-            else:
-                sorted_url = re.sub(r'sort=[^&]*', 'sort=milesHighest', current_url)
+                await page.goto(sorted_url, wait_until='domcontentloaded', timeout=20000)
+                await page.wait_for_timeout(random.randint(2000, 3000))
             
-            await page.goto(sorted_url, wait_until='networkidle', timeout=30000)
-            await asyncio.sleep(random.uniform(3, 5))
+            # Extract hotels using JavaScript
+            hotels = await page.evaluate('''() => {
+                const results = [];
+                const nameElements = document.querySelectorAll('[data-testid="hotel-name"], [class*="hotel-name"], h3[class*="hotel"], h2[class*="hotel"]');
+                
+                for (let i = 0; i < Math.min(nameElements.length, 20); i++) {
+                    const nameEl = nameElements[i];
+                    const name = nameEl.textContent || '';
+                    
+                    // Find parent card
+                    let card = nameEl.closest('[data-testid*="hotel-card"], [class*="hotel-card"], article, [class*="property-card"]');
+                    if (!card) {
+                        // Go up the tree
+                        let current = nameEl;
+                        for (let j = 0; j < 5; j++) {
+                            current = current.parentElement;
+                            if (current && current.textContent.includes('$') && current.textContent.includes('miles')) {
+                                card = current;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (card) {
+                        const cardText = card.textContent || '';
+                        
+                        // Check for 10,000 points
+                        if (cardText.includes('10,000') || cardText.includes('10000')) {
+                            // Extract price
+                            const priceMatch = cardText.match(/\\$(\\d+(?:,\\d+)?(?:\\.\\d{2})?)/);
+                            const price = priceMatch ? parseFloat(priceMatch[1].replace(',', '')) : null;
+                            
+                            if (name && price) {
+                                results.push({
+                                    name: name.trim(),
+                                    price: price,
+                                    points: 10000
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                return results;
+            }''')
             
-            # Parse results
-            hotels = await parse_hotel_results(page, city, checkin_date, checkout_date)
-            all_results.extend(hotels)
+            # Process results
+            for hotel in hotels:
+                all_results.append({
+                    'City': city,
+                    'Hotel': hotel['name'],
+                    'Price': hotel['price'],
+                    'Points': hotel['points'],
+                    'Check-in': checkin_date,
+                    'Check-out': checkout_date,
+                    'Cost per Point': hotel['price'] / hotel['points']
+                })
             
+            logging.info(f"    Found {len(hotels)} hotels with 10K points")
+            
+            # Go back for next date (saves bandwidth)
+            if date_index < len(dates_to_check) - 1:
+                await page.go_back()
+                await page.wait_for_timeout(random.randint(1500, 2000))
+                
         except Exception as e:
-            logging.error(f"Error scraping {city} for {checkin_date}: {str(e)}")
-            
-        finally:
-            if page and not page.is_closed():
-                await page.close()
-            
-            # Random delay between searches
-            await asyncio.sleep(random.uniform(5, 10))
+            logging.error(f"    Error: {str(e)}")
     
     return all_results
 
-async def parse_hotel_results(page, city, checkin_date, checkout_date):
-    """Parse hotel results from the search page"""
-    results = []
-    
-    try:
-        # Wait for hotel cards to load
-        await page.wait_for_selector('[data-testid="hotel-name"]', timeout=15000)
-        hotel_cards = await page.query_selector_all('[data-testid="hotel-name"]')
-        
-        logging.info(f"Found {len(hotel_cards)} hotels on page")
-        
-        for i, name_elem in enumerate(hotel_cards[:30]):  # Check up to 30 hotels
-            try:
-                name = await name_elem.text_content()
-                
-                # Get parent card
-                card = await name_elem.evaluate_handle('''el => {
-                    return el.closest('[data-testid*="hotel"]') || 
-                           el.closest('div').parentElement.parentElement;
-                }''')
-                
-                if not card:
-                    continue
-                
-                # Extract price
-                price = None
-                price_elem = await card.query_selector('[data-testid="earn-price"]')
-                if price_elem:
-                    price_text = await price_elem.text_content()
-                    price_match = re.search(r'[\d,]+\.?\d*', price_text.replace('$', ''))
-                    if price_match:
-                        price = float(price_match.group().replace(',', ''))
-                
-                # Extract points
-                points = None
-                miles_elem = await card.query_selector('[data-testid="tier-earn-rewards"]')
-                if miles_elem:
-                    miles_text = await miles_elem.text_content()
-                    # Look for patterns like "10,000 miles" or "Earn 10,000"
-                    miles_numbers = re.findall(r'([\d,]+)\s*(?:miles|points)?', miles_text, re.IGNORECASE)
-                    if miles_numbers:
-                        all_numbers = [int(n.replace(',', '')) for n in miles_numbers]
-                        points = max(all_numbers)  # Take the highest number as points
-                
-                if name and price and points:
-                    # Only include 10,000 point hotels
-                    if points == 10000:
-                        hotel_data = {
-                            'City': city,
-                            'Hotel': name.strip(),
-                            'Price': price,
-                            'Points': points,
-                            'Check-in': checkin_date,
-                            'Check-out': checkout_date,
-                            'Cost per Point': price / points
-                        }
-                        results.append(hotel_data)
-                        logging.info(f"Found 10K hotel: {name.strip()} - ${price}")
-                
-            except Exception as e:
-                logging.debug(f"Error parsing hotel {i}: {str(e)}")
-                continue
-        
-        logging.info(f"Found {len(results)} hotels with 10,000 points")
-        
-    except Exception as e:
-        logging.error(f"Error parsing results: {str(e)}")
-    
-    return results
-
 async def main():
-    # Load cities
-    cities_file = os.getenv('CITIES_FILE', 'cities_top200.txt')
+    # Load cities from file
+    cities_file = 'cities_top200.txt'
     try:
         with open(cities_file, 'r') as f:
-            all_cities = [line.strip() for line in f if line.strip()]
+            cities = [line.strip() for line in f if line.strip()]
+        logging.info(f"Loaded {len(cities)} cities from {cities_file}")
     except FileNotFoundError:
         logging.error(f"Cities file {cities_file} not found!")
-        return
-    
-    # Get batch parameters
-    batch_start = int(os.getenv('BATCH_START', 0))
-    batch_size = int(os.getenv('BATCH_SIZE', 10))
-    
-    cities = all_cities[batch_start:batch_start + batch_size]
-    
-    logging.info(f"Processing batch: {len(cities)} cities starting from index {batch_start}")
+        # Fallback cities for testing
+        cities = [
+            "Bangkok, Thailand",
+            "Dubai, United Arab Emirates",
+            "London, UK",
+            "Singapore",
+            "Tokyo, Japan"
+        ]
+        logging.info(f"Using {len(cities)} fallback cities")
     
     # Initialize proxy manager
     proxy_manager = ProxyManager()
-    use_proxies = os.getenv('NO_PROXY', '').lower() != 'true'
-    await proxy_manager.initialize(use_proxies=use_proxies)
+    proxy_manager.load_proxies()
     
-    # Generate dates to check
+    # Generate dates to check (3 dates)
     dates_to_check = []
-    for days_ahead in range(1, 4):  # Check 3 different dates
+    for days_ahead in range(1, 4):  # Tomorrow, day after, etc.
         checkin = datetime.now() + timedelta(days=days_ahead)
         checkout = checkin + timedelta(days=1)
         dates_to_check.append((
@@ -435,50 +289,76 @@ async def main():
             checkout.strftime("%m/%d/%Y")
         ))
     
-    # Process cities with concurrent workers
-    num_workers = int(os.getenv('NUM_WORKERS', 3))
-    semaphore = asyncio.Semaphore(num_workers)
+    logging.info(f"Will check {len(dates_to_check)} dates for each city")
     
-    async def process_city_with_semaphore(city):
-        async with semaphore:
-            logging.info(f"Starting to scrape {city}")
-            results = await scrape_city_with_retry(city, dates_to_check, proxy_manager)
+    all_results = []
+    
+    async with async_playwright() as p:
+        # Process each city
+        for i, city in enumerate(cities):
+            logging.info(f"\n{'='*60}")
+            logging.info(f"Processing city {i+1}/{len(cities)}: {city}")
+            logging.info(f"{'='*60}")
             
-            if results:
-                # Find cheapest 10K hotel for this city
-                cheapest = min(results, key=lambda x: x['Price'])
-                logging.info(f"✅ Cheapest 10K hotel in {city}: {cheapest['Hotel']} - ${cheapest['Price']}")
-                return cheapest
-            else:
-                logging.warning(f"❌ No 10K hotels found in {city}")
-                return None
-    
-    # Process all cities concurrently
-    tasks = [process_city_with_semaphore(city) for city in cities]
-    results = await asyncio.gather(*tasks)
-    
-    # Filter out None results
-    valid_results = [r for r in results if r is not None]
+            # Create new browser for each city (helps avoid detection)
+            browser = await create_browser_with_proxy(p, proxy_manager)
+            context = await create_context(browser)
+            page = await context.new_page()
+            
+            try:
+                # Scrape the city
+                city_results = await scrape_city(page, city, dates_to_check)
+                
+                if city_results:
+                    # Find cheapest 10K hotel for this city
+                    cheapest = min(city_results, key=lambda x: x['Price'])
+                    all_results.append(cheapest)
+                    logging.info(f"✅ Cheapest 10K hotel: {cheapest['Hotel']} - ${cheapest['Price']:.2f}")
+                    logging.info(f"   Dates: {cheapest['Check-in']} to {cheapest['Check-out']}")
+                else:
+                    logging.warning(f"❌ No 10K hotels found in {city}")
+                
+            except Exception as e:
+                logging.error(f"Failed to process {city}: {str(e)}")
+                
+            finally:
+                await page.close()
+                await context.close()
+                await browser.close()
+                
+                # Delay between cities
+                if i < len(cities) - 1:
+                    delay = random.uniform(5, 10)
+                    logging.info(f"Waiting {delay:.1f}s before next city...")
+                    await asyncio.sleep(delay)
     
     # Save results
-    if valid_results:
-        df = pd.DataFrame(valid_results)
-        output_file = f"cheapest_10k_hotels_batch_{batch_start}.csv"
+    if all_results:
+        # Sort by price
+        all_results.sort(key=lambda x: x['Price'])
+        
+        # Save to CSV
+        df = pd.DataFrame(all_results)
+        output_file = "cheapest_10k_hotels.csv"
         df.to_csv(output_file, index=False)
-        logging.info(f"✅ Saved {len(valid_results)} results to {output_file}")
         
-        # Also append to master file
-        master_file = "cheapest_10k_hotels_all.csv"
-        if os.path.exists(master_file):
-            existing_df = pd.read_csv(master_file)
-            combined_df = pd.concat([existing_df, df], ignore_index=True)
-            combined_df.to_csv(master_file, index=False)
-        else:
-            df.to_csv(master_file, index=False)
+        # Print summary
+        print(f"\n{'='*60}")
+        print("SUMMARY - CHEAPEST 10K HOTELS BY CITY")
+        print(f"{'='*60}")
+        print(f"Found 10K hotels in {len(all_results)}/{len(cities)} cities\n")
         
-        logging.info(f"✅ Updated master file: {master_file}")
+        for result in all_results:
+            print(f"{result['City']}:")
+            print(f"  Hotel: {result['Hotel']}")
+            print(f"  Price: ${result['Price']:.2f}")
+            print(f"  Cost per point: ${result['Cost per Point']:.4f}")
+            print(f"  Dates: {result['Check-in']} to {result['Check-out']}")
+            print()
+        
+        print(f"✅ Results saved to {output_file}")
     else:
-        logging.warning("No valid results found in this batch")
+        print("\n❌ No 10K hotels found in any city!")
 
 if __name__ == "__main__":
     asyncio.run(main())
