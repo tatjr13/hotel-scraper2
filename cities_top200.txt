@@ -3,4 +3,121 @@ Istanbul, Turkey
 London, UK  
 Hong Kong, China  
 Mecca, Saudi Arabia  
+Antalya, Turkey
+Dubai, UAE
+Macau, China
+Paris, France
+Kuala Lumpur, Malaysia
+New York, NY, USA
+Singapore, Singapore
+Rome, Italy
+Tokyo, Japan
+Delhi, India
+Taipei, Taiwan
+Seoul, South Korea
+Amsterdam, Netherlands
+Berlin, Germany
+Milan, Italy
+Barcelona, Spain
+Mumbai, India
+Vienna, Austria
+Prague, Czech Republic
+Los Angeles, CA, USA
+Chicago, IL, USA
+Miami, FL, USA
+Orlando, FL, USA
+San Francisco, CA, USA
+Las Vegas, NV, USA
+Washington, DC, USA
+Boston, MA, USA
+New Orleans, LA, USA
+Philadelphia, PA, USA
+Honolulu, HI, USA
+Seattle, WA, USA
+Atlanta, GA, USA
+Dallas, TX, USA
+Houston, TX, USA
+Phoenix, AZ, USA
+San Diego, CA, USA
+Austin, TX, USA
+Denver, CO, USA
+San Antonio, TX, USA
+Detroit, MI, USA
+Nashville, TN, USA
+Portland, OR, USA
+St. Louis, MO, USA
+San Jose, CA, USA
+Jacksonville, FL, USA
+Charlotte, NC, USA
+Indianapolis, IN, USA
+Columbus, OH, USA
+Fort Worth, TX, USA
+Toronto, Canada
+Vancouver, Canada
+Montreal, Canada
+Ottawa, Canada
+Mexico City, Mexico
+Buenos Aires, Argentina
+Rio de Janeiro, Brazil
+Sao Paulo, Brazil
+Lima, Peru
+Bogota, Colombia
+Santiago, Chile
+Madrid, Spain
+Lisbon, Portugal
+Moscow, Russia
+Saint Petersburg, Russia
+Abu Dhabi, UAE
+Doha, Qatar
+Riyadh, Saudi Arabia
+Cape Town, South Africa
+Nairobi, Kenya
+Cairo, Egypt
+Marrakesh, Morocco
+Istanbul, Turkey
+Athens, Greece
+Brussels, Belgium
+Zurich, Switzerland
+Geneva, Switzerland
+Florence, Italy
+Venice, Italy
+Munich, Germany
+Frankfurt, Germany
+Hamburg, Germany
+Stockholm, Sweden
+Copenhagen, Denmark
+Oslo, Norway
+Helsinki, Finland
+Reykjavik, Iceland
+Sydney, Australia
+Melbourne, Australia
+Auckland, New Zealand
+Christchurch, New Zealand
+Osaka, Japan
+Kyoto, Japan
+Hong Kong, China
+Beijing, China
+Shanghai, China
+Bangkok, Thailand
+Phuket, Thailand
+Hanoi, Vietnam
+Ho Chi Minh City, Vietnam
+Jakarta, Indonesia
+Bangalore, India
+Kathmandu, Nepal
+Tel Aviv, Israel
+Jerusalem, Israel
+Casablanca, Morocco
+Lagos, Nigeria
+Quito, Ecuador
+Panama City, Panama
+Havana, Cuba
+Kingston, Jamaica
+San Juan, Puerto Rico
+Montego Bay, Jamaica
+Aruba, Aruba
+Barbados, Barbados
+Nassau, Bahamas
+Manila, Philippines
+London, UK
   
