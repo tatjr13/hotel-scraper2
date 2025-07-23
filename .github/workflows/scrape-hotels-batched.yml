@@ -24,16 +24,16 @@ jobs:
         run: |
           # Read cities and create batches
           BATCH_SIZE=${{ github.event.inputs.batch_size || '10' }}
-          
+
           # Count total cities
           TOTAL_CITIES=$(wc -l < cities_top200.txt)
           echo "Total cities: $TOTAL_CITIES"
-          
+
           # Calculate number of batches
           TOTAL_BATCHES=$(( (TOTAL_CITIES + BATCH_SIZE - 1) / BATCH_SIZE ))
           echo "Total batches: $TOTAL_BATCHES"
-          
-          # CHANGED: Create matrix JSON with both batch number and start index
+
+          # Create matrix JSON with batch and start index
           MATRIX_JSON="{\"include\":["
           for i in $(seq 0 $((TOTAL_BATCHES - 1))); do
             if [ $i -gt 0 ]; then
@@ -43,11 +43,10 @@ jobs:
             MATRIX_JSON="${MATRIX_JSON}{\"batch\":${i},\"start\":${START_IDX}}"
           done
           MATRIX_JSON="${MATRIX_JSON}]}"
-          
+
           echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
           echo "total_batches=$TOTAL_BATCHES" >> $GITHUB_OUTPUT
-          
-          # Debug output
+
           echo "Matrix: $MATRIX_JSON"
 
   scrape:
@@ -69,15 +68,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install from requirements.txt if it exists
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # Fallback to installing known dependencies
             pip install pandas==2.0.3 numpy==1.24.3 playwright more_itertools aiohttp
           fi
-          
-          # Install playwright browsers if playwright is installed
           if pip show playwright > /dev/null 2>&1; then
             echo "Installing Playwright browsers..."
             playwright install chromium
@@ -89,19 +84,14 @@ jobs:
         run: |
           echo "Decrypting proxy file..."
           openssl enc -d -aes-256-cbc -pbkdf2 -in formatted_proxies.txt.enc -out formatted_proxies.txt -k "$PROXY_PASSWORD"
-          
-          # Verify decryption worked
           if [ ! -f formatted_proxies.txt ]; then
             echo "Error: Proxy file decryption failed!"
             exit 1
           fi
-          
-          # Check file is not empty
           if [ ! -s formatted_proxies.txt ]; then
             echo "Error: Decrypted proxy file is empty!"
             exit 1
           fi
-          
           echo "Proxy file decrypted successfully"
           echo "Proxy file size: $(wc -c < formatted_proxies.txt) bytes"
 
@@ -110,19 +100,14 @@ jobs:
         run: |
           BATCH_SIZE=${{ github.event.inputs.batch_size || '10' }}
           BATCH_NUM=${{ matrix.batch }}
-          
-          # Calculate start and end lines
+
           START_LINE=$((BATCH_NUM * BATCH_SIZE + 1))
           END_LINE=$(((BATCH_NUM + 1) * BATCH_SIZE))
-          
-          # Extract cities for this batch
+
           sed -n "${START_LINE},${END_LINE}p" cities_top200.txt > cities_batch_${BATCH_NUM}.txt
-          
-          # Count cities in batch
           BATCH_CITY_COUNT=$(wc -l < cities_batch_${BATCH_NUM}.txt)
           echo "Batch $BATCH_NUM contains $BATCH_CITY_COUNT cities (lines $START_LINE-$END_LINE)"
-          
-          # Save batch info for later
+
           echo "batch_num=${BATCH_NUM}" >> $GITHUB_OUTPUT
           echo "batch_city_count=${BATCH_CITY_COUNT}" >> $GITHUB_OUTPUT
 
@@ -131,34 +116,15 @@ jobs:
         continue-on-error: true
         run: |
           BATCH_NUM=${{ steps.prep-batch.outputs.batch_num }}
-          BATCH_SIZE=${{ github.event.inputs.batch_size || '10' }}
-          
-          # CHANGED: Use the start value from the matrix instead of calculating it
-          BATCH_START=${{ matrix.start }}
-          
-          echo "Running scraper for batch $BATCH_NUM..."
-          echo "Batch start: $BATCH_START, size: $BATCH_SIZE"
-          
-          # Make sure proxy file exists
-          if [ ! -f formatted_proxies.txt ]; then
-            echo "ERROR: Proxy file not found!"
-            exit 1
-          fi
-          
-          echo "Proxy file size: $(wc -c < formatted_proxies.txt) bytes"
-          echo "Proxy file lines: $(wc -l < formatted_proxies.txt)"
-          
-          # Run the scraper WITH PROXIES (no --no-proxy flag!)
+
+          # Scrape only this batch's cities!
           if python aa_hotels_scraper.py \
             --proxies formatted_proxies.txt \
-            --cities cities_top200.txt \
-            --batch-start ${BATCH_START} \
-            --batch-size ${BATCH_SIZE} \
+            --cities cities_batch_${BATCH_NUM}.txt \
             --concurrent 3; then
             echo "Scraper completed successfully"
             echo "status=success" >> $GITHUB_OUTPUT
-            
-            # The scraper saves to a fixed filename, so rename it
+
             if [ -f cheapest_10k_hotels_by_city.csv ]; then
               mv cheapest_10k_hotels_by_city.csv hotels_batch_${BATCH_NUM}.csv
               echo "Renamed output file to hotels_batch_${BATCH_NUM}.csv"
@@ -167,13 +133,10 @@ jobs:
             SCRAPER_EXIT=$?
             echo "Scraper failed with exit code $SCRAPER_EXIT"
             echo "status=failed" >> $GITHUB_OUTPUT
-            
-            # Create empty CSV with error message
             echo "City,Hotel,Price,Cost per Point,ProxyUsed,error_message" > hotels_batch_${BATCH_NUM}.csv
             echo "batch_${BATCH_NUM},,,,,Scraper failed" >> hotels_batch_${BATCH_NUM}.csv
           fi
-          
-          # Check if output file exists
+
           if [ -f hotels_batch_${BATCH_NUM}.csv ]; then
             echo "Output file created: $(wc -l < hotels_batch_${BATCH_NUM}.csv) lines"
             echo "Preview:"
@@ -216,91 +179,71 @@ jobs:
 
       - name: Combine CSV files
         run: |
-          # Create a Python script to combine results
           cat > combine_results.py << 'PYTHON_SCRIPT'
           import os
           import pandas as pd
           import glob
           from pathlib import Path
-          
+
           def combine_csv_files():
-              """Combine all batch CSV files into a single result file."""
-              
-              # Find all CSV files
               csv_pattern = "batch-results/*/hotels_batch_*.csv"
               csv_files = glob.glob(csv_pattern)
-              
               print(f"Found {len(csv_files)} CSV files to combine")
-              
+
               if not csv_files:
                   print("No CSV files found!")
-                  # Create empty result file with correct columns
                   empty_df = pd.DataFrame(columns=['City', 'Hotel', 'Price', 'Cost per Point', 'ProxyUsed'])
                   empty_df.to_csv('hotels_all_results.csv', index=False)
                   print("Created empty results file")
                   return
-              
-              # Read and combine all CSV files
+
               all_dfs = []
               for csv_file in sorted(csv_files):
                   print(f"Reading: {csv_file}")
                   try:
                       df = pd.read_csv(csv_file)
-                      # Add source file info
                       df['source_batch'] = os.path.basename(csv_file)
                       all_dfs.append(df)
                       print(f"  - Added {len(df)} rows")
                   except Exception as e:
                       print(f"  - Error reading {csv_file}: {e}")
                       continue
-              
+
               if not all_dfs:
                   print("No valid data found in any CSV files!")
                   empty_df = pd.DataFrame(columns=['City', 'Hotel', 'Price', 'Cost per Point', 'ProxyUsed'])
                   empty_df.to_csv('hotels_all_results.csv', index=False)
                   return
-              
-              # Combine all dataframes
+
               combined_df = pd.concat(all_dfs, ignore_index=True)
-              
-              # Remove duplicate entries if any
+
               initial_count = len(combined_df)
-              # Assuming we want to keep unique combinations of city and hotel
               if 'City' in combined_df.columns and 'Hotel' in combined_df.columns:
                   combined_df = combined_df.drop_duplicates(subset=['City', 'Hotel'], keep='first')
                   removed_count = initial_count - len(combined_df)
                   if removed_count > 0:
                       print(f"Removed {removed_count} duplicate entries")
-              
-              # Sort by city name if column exists
+
               if 'City' in combined_df.columns:
                   combined_df = combined_df.sort_values('City')
-              
-              # Save combined results
+
               output_file = 'hotels_all_results.csv'
               combined_df.to_csv(output_file, index=False)
-              
               print(f"\nCombined results saved to {output_file}")
               print(f"Total rows: {len(combined_df)}")
               print(f"Columns: {', '.join(combined_df.columns)}")
-              
-              # Print summary statistics
               if 'City' in combined_df.columns:
                   print(f"\nCities processed: {combined_df['City'].nunique()}")
               if 'Hotel' in combined_df.columns:
                   print(f"Total hotels: {combined_df['Hotel'].nunique()}")
               if 'Price' in combined_df.columns:
                   print(f"Average price: ${combined_df['Price'].mean():.2f}")
-              
-              # Show first few rows
               print("\nFirst 5 rows of combined data:")
               print(combined_df.head().to_string())
-          
+
           if __name__ == "__main__":
               combine_csv_files()
           PYTHON_SCRIPT
-          
-          # Run the combine script
           python combine_results.py
 
       - name: Upload combined results
@@ -330,4 +273,3 @@ jobs:
               echo "## Scraping Failed"
               echo "No combined results file was created."
             } >> $GITHUB_STEP_SUMMARY
-          fi
